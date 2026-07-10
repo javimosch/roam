@@ -3,3 +3,5 @@
 *.o
 *.log
 /scratch/
+/roam-x86_64-linux
+*.sha256

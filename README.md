@@ -8,6 +8,26 @@ One **static native binary** (built with [machin](https://github.com/javimosch/m
 no Python, no runtime, no deps). The same binary is both the local **controller** and
 the remote **worker**; "self-replication" is literally `scp`-ing the executable.
 
+**Landing + changelog:** [javimosch.github.io/roam](https://javimosch.github.io/roam)
+
+## Install
+
+Grab the static binary from [Releases](https://github.com/javimosch/roam/releases)
+(`roam-x86_64-linux` — bundles SQLite + OpenSSL + a CA store, runs FROM scratch on any
+x86-64 Linux, no deps):
+
+```bash
+curl -fsSL https://github.com/javimosch/roam/releases/latest/download/roam-x86_64-linux -o roam
+chmod +x roam && ./roam help
+```
+
+Or build from source (needs the [machin](https://github.com/javimosch/machin) compiler):
+
+```bash
+make build      # dynamic (links host libsqlite3 + OpenSSL)
+make release    # fully-static roam-x86_64-linux
+```
+
 ## Status
 
 **Slice 1 — the skeleton (done, end-to-end on a real remote).** No LLM yet: a detached
