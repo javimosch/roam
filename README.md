@@ -10,6 +10,13 @@ the remote **worker**; "self-replication" is literally `scp`-ing the executable.
 
 **Landing + changelog:** [javimosch.github.io/roam](https://javimosch.github.io/roam)
 
+**Proven end-to-end:** in a live run, a roam agent was dispatched to a remote box with the
+goal *"add a unit test to the machin repo in a git worktree and open a PR"* — it cloned the
+repo, wrote a passing Go test, parked on `git push` for out-of-band approval (the confirm-gate),
+and filed a PR that was reviewed and **merged**
+([machin#433](https://github.com/javimosch/machin/pull/433)). One static binary, no Python on
+the target.
+
 ## Install
 
 Grab the static binary from [Releases](https://github.com/javimosch/roam/releases)
