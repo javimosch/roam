@@ -249,7 +249,7 @@
         <h2>Leave agents running. Sleep fine.</h2>
         <p>The roam CLI is free and open source today. Join the waitlist for the hosted panel —
           notify, approve from anywhere, and fleet view.</p>
-        <form onsubmit="event.preventDefault();var e=this.querySelector('input').value;window.location.href='mailto:roam@reply.intrane.fr?subject=roam%20early%20access&body='+encodeURIComponent(e);this.style.display='none';document.getElementById('thx').style.display='block';">
+        <form onsubmit="event.preventDefault();var e=this.querySelector('input').value;try{window.SuperInsights&&SuperInsights.trackEvent&&SuperInsights.trackEvent('waitlist_signup',{email:e});SuperInsights.flush&&SuperInsights.flush();}catch(_){}this.style.display='none';document.getElementById('thx').style.display='block';">
           <input type="email" required placeholder="you@company.com" aria-label="email">
           <button class="btn btn-primary" type="submit" data-id="cta-waitlist-submit">Get early access</button>
         </form>
@@ -271,7 +271,7 @@
     if (window.SuperInsights) {
       SuperInsights.init('pk_babc649a432174dffa12b426eec2d2a6f80a8b4b02eccd67b157ce586712b290', { apiUrl: 'https://superinsights.coolify.intrane.fr' });
       document.querySelectorAll('[data-id]').forEach(function(el){
-        el.addEventListener('click', function(){ try { SuperInsights.track && SuperInsights.track('cta_click', { id: el.getAttribute('data-id') }); } catch(e){} });
+        el.addEventListener('click', function(){ try { SuperInsights.trackEvent && SuperInsights.trackEvent('cta_click', { id: el.getAttribute('data-id') }); } catch(e){} });
       });
     }
   </script>
