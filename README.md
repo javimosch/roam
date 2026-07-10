@@ -51,10 +51,18 @@ roam stop   rbm21
   and `--tokens` freeze the run (`status: halted`) the moment either is hit; the
   append-only **journal** records every model turn, tool call, result, and token cost;
   the mailbox is the **stop / steer** channel, applied at loop checkpoints.
+- **Providers:** `--provider anthropic` (default; Anthropic Messages API) or
+  `--provider openai` (any OpenAI-compatible endpoint — OpenRouter, etc. — via
+  `--api-base`). Both speak the same tools/sandbox/budget machinery; only the wire shape
+  differs. Key from `ROAM_API_KEY` or `ANTHROPIC_API_KEY`.
 - **Model:** default `claude-opus-4-8` (`--model` to override). Non-streaming,
   `max_tokens 16000`, transient `429`/`5xx` retried with backoff.
-- The assistant turn is replayed **verbatim** each iteration (content array preserved),
-  so tool-use pairing stays correct.
+- The assistant turn is replayed **verbatim** each iteration, so tool-use pairing stays
+  correct across turns.
+
+**Live-proven on rbm21** (OpenRouter, `poolside/laguna-xs-2.1`, `--allow-shell`): a
+dispatched agent self-replicated, ran `uname`/`nproc`/`free`/`df` on the box, wrote a
+Markdown `report.md`, and finished — watched live over ssh via `attach`.
 
 Verified: the loop mechanics (write→read→finish, multi-turn accumulation, budget halt,
 workdir-escape refusal, shell gate, mid-loop stop) driven end-to-end through a local

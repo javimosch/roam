@@ -65,6 +65,12 @@ func db_path(jobid) (p) { p = roam_home() + "/" + jobid + ".db" }
 
 func write_last(jobid) { write_file(roam_home() + "/last", jobid) }
 
+// is_terminal: has the job reached an end state? (attach stops streaming on these.)
+func is_terminal(st) (b) {
+    b = 0
+    if st == "stopped" || st == "done" || st == "halted" || st == "error" { b = 1 }
+}
+
 // flag_rest returns every arg after `name`, space-joined (for --goal, which is
 // multi-word and must therefore be the last flag on the command line).
 func flag_rest(a, name) (v) {
@@ -112,7 +118,7 @@ func mailbox_put(db, cmd, arg) {
 
 // init_job creates a fresh job's DB + initial state. Same code path locally and on the
 // remote (called by _boot), so a job looks identical wherever it runs.
-func init_job(jobid, goal, every, host, kind, model, maxiter, tokbudget, allow_shell, apibase, key) {
+func init_job(jobid, goal, every, host, kind, provider, model, maxiter, tokbudget, allow_shell, apibase, key) {
     db := open_db(db_path(jobid))
     ensure_schema(db)
     state_set(db, "status", "running")
@@ -122,6 +128,7 @@ func init_job(jobid, goal, every, host, kind, model, maxiter, tokbudget, allow_s
     state_set(db, "host", host)
     state_set(db, "started", str(now()))
     state_set(db, "kind", kind)              // "agent" (LLM loop) | "tick" (skeleton demo)
+    state_set(db, "provider", provider)      // "anthropic" | "openai" (OpenAI-compatible)
     state_set(db, "model", model)
     state_set(db, "maxiter", maxiter)
     state_set(db, "tokbudget", tokbudget)
@@ -255,13 +262,14 @@ func build_tools_json(allow_shell) (t) {
     t = "[" + join(parts, ",") + "]"
 }
 
-// exec_tool runs one tool_use block; returns (result_text, is_error).
-func exec_tool(db, resp, bi, name, workdir, allow_shell) (result, iserr) {
+// exec_tool runs one tool call. `argsjson` is the decoded tool-input OBJECT (e.g.
+// {"command":"ls"}) — the same shape for both providers (Anthropic .input, or an
+// OpenAI tool_call's JSON-decoded .function.arguments). Returns (result, is_error).
+func exec_tool(db, name, argsjson, workdir, allow_shell) (result, iserr) {
     iserr = 0
-    base := ".content[" + str(bi) + "].input"
     if name == "run_shell" {
         if allow_shell == 0 { result = "run_shell is disabled for this job (re-dispatch with --allow-shell to enable)"  iserr = 1  return result, iserr }
-        cmdq, _ := json_get(resp, base + ".command")
+        cmdq, _ := json_get(argsjson, ".command")
         cmd := junquote(cmdq)
         journal(db, "tool", "run_shell: " + first_n(cmd, 200))
         outf := workdir + "/.roam_tool_out"
@@ -270,7 +278,7 @@ func exec_tool(db, resp, bi, name, workdir, allow_shell) (result, iserr) {
         return result, iserr
     }
     if name == "read_file" {
-        pq, _ := json_get(resp, base + ".path")
+        pq, _ := json_get(argsjson, ".path")
         p := junquote(pq)
         full, ok := safe_path(workdir, p)
         if ok == 0 { result = "path not allowed (must be relative, inside the workdir): " + p  iserr = 1  return result, iserr }
@@ -279,8 +287,8 @@ func exec_tool(db, resp, bi, name, workdir, allow_shell) (result, iserr) {
         return result, iserr
     }
     if name == "write_file" {
-        pq, _ := json_get(resp, base + ".path")
-        cq, _ := json_get(resp, base + ".content")
+        pq, _ := json_get(argsjson, ".path")
+        cq, _ := json_get(argsjson, ".content")
         p := junquote(pq)
         content := junquote(cq)
         full, ok := safe_path(workdir, p)
@@ -291,7 +299,7 @@ func exec_tool(db, resp, bi, name, workdir, allow_shell) (result, iserr) {
         return result, iserr
     }
     if name == "finish" {
-        sq, _ := json_get(resp, base + ".summary")
+        sq, _ := json_get(argsjson, ".summary")
         result = junquote(sq)
         return result, iserr
     }
@@ -312,10 +320,9 @@ func agent_drain(db) (sig) {
     }
 }
 
-// call_api POSTs one request, retrying transient 429/5xx a few times. Returns
+// http_post_retry POSTs one request, retrying transient 429/5xx a few times. Returns
 // (status, body). status 0 means the transport itself failed.
-func call_api(url, key, body) (status, resp) {
-    hdrs := []string{"x-api-key: " + key, "anthropic-version: 2023-06-01", "content-type: application/json"}
+func http_post_retry(url, hdrs, body) (status, resp) {
     tries := 0
     for tries < 4 {
         st, rb, er := http_request("POST", url, hdrs, body)
@@ -329,6 +336,10 @@ func call_api(url, key, body) (status, resp) {
     }
     status = 429
     resp = "retries exhausted"
+}
+func call_api(url, key, body) (status, resp) {
+    hdrs := []string{"x-api-key: " + key, "anthropic-version: 2023-06-01", "content-type: application/json"}
+    status, resp = http_post_retry(url, hdrs, body)
 }
 
 var AGENT_SYSTEM = "You are roam, an autonomous agent running unattended on a remote machine. Work toward the user's goal using the provided tools. You are operating autonomously: the user is not watching in real time and cannot answer questions mid-task, so do not ask for confirmation — for reversible actions that follow from the goal, just proceed. All file paths are relative to your working directory. When the goal is complete, call the finish tool with a short summary. Keep any text between tool calls to one brief sentence."
@@ -395,9 +406,10 @@ func agent_loop(db, jobid) {
                 if bt == "tool_use" {
                     tid, _ := json_get(resp, ".content[" + str(bi) + "].id")
                     tnm, _ := json_get(resp, ".content[" + str(bi) + "].name")
+                    arg, _ := json_get(resp, ".content[" + str(bi) + "].input")
                     id := junquote(tid)
                     nm := junquote(tnm)
-                    res, iserr := exec_tool(db, resp, bi, nm, workdir, allow_shell)
+                    res, iserr := exec_tool(db, nm, arg, workdir, allow_shell)
                     if nm == "finish" { finished = 1  finishmsg = res }
                     errflag := "false"
                     if iserr == 1 { errflag = "true" }
@@ -426,6 +438,109 @@ func agent_loop(db, jobid) {
     sqlite_close(db)
 }
 
+// ---- OpenAI-compatible provider (OpenRouter, etc.) ----------------------------
+// Same agent, different wire shape: Bearer auth, /chat/completions, tools wrapped in
+// {"type":"function",...}, tool_calls with args as a JSON STRING, and per-call
+// {"role":"tool",...} result messages. Shares exec_tool / budgets / mailbox / journal.
+
+func build_tools_openai(allow_shell) (t) {
+    parts := []string{}
+    if allow_shell == 1 {
+        parts = append(parts, "{\"type\":\"function\",\"function\":{\"name\":\"run_shell\",\"description\":\"Run a shell command in the working directory; returns combined stdout+stderr and the exit code.\",\"parameters\":{\"type\":\"object\",\"properties\":{\"command\":{\"type\":\"string\"}},\"required\":[\"command\"]}}}")
+    }
+    parts = append(parts, "{\"type\":\"function\",\"function\":{\"name\":\"read_file\",\"description\":\"Read a file. Path is relative to the working directory.\",\"parameters\":{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"}},\"required\":[\"path\"]}}}")
+    parts = append(parts, "{\"type\":\"function\",\"function\":{\"name\":\"write_file\",\"description\":\"Write a file. Path is relative to the working directory.\",\"parameters\":{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"},\"content\":{\"type\":\"string\"}},\"required\":[\"path\",\"content\"]}}}")
+    parts = append(parts, "{\"type\":\"function\",\"function\":{\"name\":\"finish\",\"description\":\"Call this when the goal is complete. Provide a short summary of what was accomplished.\",\"parameters\":{\"type\":\"object\",\"properties\":{\"summary\":{\"type\":\"string\"}},\"required\":[\"summary\"]}}}")
+    t = "[" + join(parts, ",") + "]"
+}
+
+func agent_loop_openai(db, jobid) {
+    key := state_get(db, "api_key")
+    model := state_get(db, "model")
+    goal := state_get(db, "goal")
+    apibase := state_get(db, "api_base")
+    maxiter := atoi(state_get(db, "maxiter"))
+    tokbudget := atoi(state_get(db, "tokbudget"))
+    allow_shell := 0
+    if state_get(db, "allow_shell") == "1" { allow_shell = 1 }
+    if key == "" { journal(db, "error", "no api_key set for this job")  state_set(db, "status", "error")  return }
+
+    workdir := roam_home() + "/work/" + jobid
+    mkdir_p2(roam_home() + "/work", workdir)
+    url := apibase + "/chat/completions"
+    tools := build_tools_openai(allow_shell)
+    hdrs := []string{"Authorization: Bearer " + key, "content-type: application/json"}
+
+    journal(db, "system", "agent loop started [openai] (model=" + model + ", maxiter=" + str(maxiter) + ", tokens<=" + str(tokbudget) + ", shell=" + str(allow_shell) + ")")
+    msgs := "{\"role\":\"system\",\"content\":" + jstr(AGENT_SYSTEM) + "},{\"role\":\"user\",\"content\":" + jstr(goal) + "}"
+    iters := 0
+    spent := 0
+    done := 0
+    for done == 0 {
+        sig := agent_drain(db)
+        if sig == "stop" { journal(db, "system", "stopped by user")  state_set(db, "status", "stopped")  sqlite_close(db)  return }
+        if has_prefix(sig, "note:") { msgs = msgs + ",{\"role\":\"user\",\"content\":" + jstr("[operator note] " + substr(sig, 5, len(sig))) + "}" }
+
+        if iters >= maxiter { journal(db, "budget", "iteration budget reached (" + str(maxiter) + ") — halting")  state_set(db, "status", "halted")  sqlite_close(db)  return }
+        if spent >= tokbudget { journal(db, "budget", "token budget reached (" + str(spent) + "/" + str(tokbudget) + ") — halting")  state_set(db, "status", "halted")  sqlite_close(db)  return }
+
+        body := "{\"model\":" + jstr(model) + ",\"max_tokens\":16000,\"messages\":[" + msgs + "],\"tools\":" + tools + ",\"tool_choice\":\"auto\"}"
+        status, resp := http_post_retry(url, hdrs, body)
+        if status != 200 { journal(db, "error", "api status " + str(status) + ": " + first_n(resp, 400))  state_set(db, "status", "error")  sqlite_close(db)  return }
+
+        spent = spent + atoi_json(resp, ".usage.prompt_tokens") + atoi_json(resp, ".usage.completion_tokens")
+        iters = iters + 1
+        state_set(db, "tokens", str(spent))
+        state_set(db, "iters", str(iters))
+
+        // append the assistant message VERBATIM (preserves tool_calls for pairing)
+        amsg, _ := json_get(resp, ".choices[0].message")
+        msgs = msgs + "," + amsg
+        ctq, _ := json_get(resp, ".choices[0].message.content")
+        ct := junquote(ctq)
+        if ct != "" && ct != "null" { journal(db, "llm", ct) }
+
+        finished := 0
+        finishmsg := ""
+        toolmsgs := []string{}
+        ti := 0
+        for done == 0 {
+            idq, okt := json_get(resp, ".choices[0].message.tool_calls[" + str(ti) + "].id")
+            if okt != "" { done = -1 }
+            if done == 0 {
+                nmq, _ := json_get(resp, ".choices[0].message.tool_calls[" + str(ti) + "].function.name")
+                argq, _ := json_get(resp, ".choices[0].message.tool_calls[" + str(ti) + "].function.arguments")
+                id := junquote(idq)
+                nm := junquote(nmq)
+                argsjson := junquote(argq)   // args arrive as a JSON string -> decode to the object
+                res, iserr := exec_tool(db, nm, argsjson, workdir, allow_shell)
+                if nm == "finish" { finished = 1  finishmsg = res }
+                _ = iserr
+                toolmsgs = append(toolmsgs, "{\"role\":\"tool\",\"tool_call_id\":" + jstr(id) + ",\"content\":" + jstr(res) + "}")
+                ti = ti + 1
+            }
+        }
+        done = 0
+
+        i := 0
+        for i < len(toolmsgs) { msgs = msgs + "," + toolmsgs[i]  i = i + 1 }
+
+        if finished == 1 { journal(db, "system", "agent finished: " + finishmsg)  state_set(db, "status", "done")  sqlite_close(db)  return }
+        fr, _ := json_get(resp, ".choices[0].finish_reason")
+        if junquote(fr) != "tool_calls" {
+            journal(db, "system", "agent ended its turn (finish_reason=" + junquote(fr) + ")")
+            state_set(db, "status", "done")
+            sqlite_close(db)
+            return
+        }
+        if len(toolmsgs) == 0 {
+            journal(db, "error", "finish_reason=tool_calls but no tool_calls parsed — halting")
+            state_set(db, "status", "error")  sqlite_close(db)  return
+        }
+    }
+    sqlite_close(db)
+}
+
 func cmd_work(a) {
     if len(a) < 3 { write(2, "roam _work: needs <jobid>\n")  exit(64) }
     jobid := a[2]
@@ -433,7 +548,11 @@ func cmd_work(a) {
     ensure_schema(db)
     journal(db, "system", "worker started")
     state_set(db, "status", "running")
-    if state_get(db, "kind") == "agent" { agent_loop(db, jobid)  return }
+    if state_get(db, "kind") == "agent" {
+        if state_get(db, "provider") == "openai" { agent_loop_openai(db, jobid)  return }
+        agent_loop(db, jobid)
+        return
+    }
     // "tick" (skeleton) mode: trivial work loop (no LLM).
     every := atoi(state_get(db, "every"))   // seconds (user unit)
     if every < 1 { every = 10 }
@@ -467,6 +586,9 @@ func cfg_tokens(a) (v) { v = flag(a, "--tokens", "300000") }
 func cfg_apibase(a) (v) { v = flag(a, "--api-base", "https://api.anthropic.com") }
 func cfg_shell(a) (v) { v = "0"  if has_flag(a, "--allow-shell") { v = "1" } }
 func cfg_kind(a) (v) { v = "agent"  if has_flag(a, "--tick") { v = "tick" } }
+func cfg_provider(a) (v) { v = flag(a, "--provider", "anthropic") }
+// get_key: the provider-neutral ROAM_API_KEY wins, else ANTHROPIC_API_KEY.
+func get_key() (k) { k = env("ROAM_API_KEY")  if k == "" { k = env("ANTHROPIC_API_KEY") } }
 
 func cmd_send(a) {
     to := flag(a, "--to", "")
@@ -475,11 +597,12 @@ func cmd_send(a) {
     local := has_flag(a, "--local")
     model := cfg_model(a)  maxiter := cfg_maxiter(a)  tokbudget := cfg_tokens(a)
     apibase := cfg_apibase(a)  allow_shell := cfg_shell(a)  kind := cfg_kind(a)
-    key := env("ANTHROPIC_API_KEY")
+    provider := cfg_provider(a)
+    key := get_key()
     jobid := to_hex(rand_bytes(4))   // decided by the controller, shipped to the remote
 
     if local {
-        init_job(jobid, goal, every, "local", kind, model, maxiter, tokbudget, allow_shell, apibase, key)
+        init_job(jobid, goal, every, "local", kind, provider, model, maxiter, tokbudget, allow_shell, apibase, key)
         spawn_worker(jobid)
         write_last(jobid)
         println("{\"ok\":true,\"mode\":\"local\",\"kind\":" + jstr(kind) + ",\"jobid\":" + jstr(jobid) + "}")
@@ -495,10 +618,10 @@ func cmd_send(a) {
     system("ssh " + to + " 'chmod +x ~/.roam/roam'")
     // config as flags; the API key rides as an env var on the remote command (kept out
     // of the arg list). --goal MUST be last (flag_rest consumes the remainder as goal).
-    cfgflags := " --model " + model + " --max-iters " + maxiter + " --tokens " + tokbudget + " --api-base " + apibase
+    cfgflags := " --provider " + provider + " --model " + model + " --max-iters " + maxiter + " --tokens " + tokbudget + " --api-base " + apibase
     if allow_shell == "1" { cfgflags = cfgflags + " --allow-shell" }
     if kind == "tick" { cfgflags = cfgflags + " --tick" }
-    bootcmd := "ssh " + to + " 'ANTHROPIC_API_KEY=" + key + " ~/.roam/roam _boot " + jobid + " " + every + cfgflags + " --goal " + goal + "' >/dev/null"
+    bootcmd := "ssh " + to + " 'ROAM_API_KEY=" + key + " ~/.roam/roam _boot " + jobid + " " + every + cfgflags + " --goal " + goal + "' >/dev/null"
     // _boot inits the job DB + detaches the worker on the remote; its stdout is
     // suppressed so the controller emits exactly one JSON answer.
     if system(bootcmd) != 0 { write(2, "{\"ok\":false,\"error\":\"remote boot failed\"}\n")  exit(100) }
@@ -516,7 +639,7 @@ func cmd_boot(a) {
     jobid := a[2]
     every := a[3]
     goal := flag_rest(a, "--goal")
-    init_job(jobid, goal, every, "self", cfg_kind(a), cfg_model(a), cfg_maxiter(a), cfg_tokens(a), cfg_shell(a), cfg_apibase(a), env("ANTHROPIC_API_KEY"))
+    init_job(jobid, goal, every, "self", cfg_kind(a), cfg_provider(a), cfg_model(a), cfg_maxiter(a), cfg_tokens(a), cfg_shell(a), cfg_apibase(a), get_key())
     spawn_worker(jobid)
     println("{\"ok\":true,\"jobid\":" + jstr(jobid) + "}")
 }
@@ -562,8 +685,8 @@ func cmd_attach(a) {
             lastid = j.id
         }
         st := state_get(db, "status")
-        if st == "stopped" {
-            write(2, "[attach] job stopped\n")
+        if is_terminal(st) == 1 {
+            write(2, "[attach] job " + st + "\n")
             done = 1
         } else {
             sleep(1)
@@ -601,8 +724,9 @@ func usage() {
     write(2, "usage:\n")
     write(2, "  roam send --to <host> [flags] --goal <text>   # dispatch an agent (--goal LAST)\n")
     write(2, "    flags: --local  --allow-shell  --tick  --model <id>\n")
-    write(2, "           --max-iters <n>  --tokens <n>  --api-base <url>  --every <secs>\n")
-    write(2, "    (agent mode reads ANTHROPIC_API_KEY from the environment)\n")
+    write(2, "           --provider anthropic|openai  --api-base <url>\n")
+    write(2, "           --max-iters <n>  --tokens <n>  --every <secs>\n")
+    write(2, "    (agent mode reads the API key from ROAM_API_KEY or ANTHROPIC_API_KEY)\n")
     write(2, "  roam status <host|jobid|last>\n")
     write(2, "  roam attach <host|jobid|last>\n")
     write(2, "  roam steer  <host|jobid|last> <message>\n")
