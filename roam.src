@@ -1,0 +1,270 @@
+// roam — dispatch an autonomous agent that roams to a remote box and works while
+// you're away. ONE static binary, controller + worker in the same executable.
+//
+// Slice 1a (this file): the SKELETON — no LLM yet. Proves the machine end to end,
+// fully locally: a detached worker loop that ticks trivial work into a SQLite
+// journal, drains a steering mailbox at each checkpoint, and is inspectable /
+// steerable / stoppable from separate control commands. The ssh `send`-to-remote
+// layer (slice 1b) drops on top of this unchanged: control ops just run over ssh
+// against the same journal.
+//
+// Storage (per job): ~/.roam/<jobid>.db, SQLite in WAL mode so the worker (writer)
+// and status/attach (readers) can hold it at once.
+//   state   (k, v)                 — status | goal | every | tick | host | started
+//   journal (id, ts, kind, msg)    — append-only, the audit trail you'll `pull`
+//   mailbox (id, ts, consumed, cmd, arg) — steering, drained at safe checkpoints
+//
+// Agent-first CLI contract: stdout = JSON answer, stderr = errors, semantic exits.
+
+type KV struct { v string }
+type JRow struct { id int  ts int  kind string  msg string }
+type MRow struct { id int  cmd string  arg string }
+
+// ---- small helpers ------------------------------------------------------------
+
+// jstr JSON-encodes a string (no json-encode builtin yet): quote + escape.
+func jstr(s) (out) {
+    b := bytes(s)
+    r := "\""
+    i := 0
+    for i < len(b) {
+        c := byte_at(b, i)
+        if c == 34 { r = r + "\\\"" } else {
+        if c == 92 { r = r + "\\\\" } else {
+        if c == 10 { r = r + "\\n" } else {
+        if c == 9 { r = r + "\\t" } else {
+        if c == 13 { r = r + "\\r" } else {
+            r = r + substr(s, i, i + 1)
+        }}}}}
+        i = i + 1
+    }
+    out = r + "\""
+}
+
+func atoi(s) (n) { n = parse(s, 0) }
+
+func flag(a, name, def) (v) {
+    v = def
+    i := 0
+    for i < len(a) {
+        if a[i] == name && i + 1 < len(a) { v = a[i + 1] }
+        i = i + 1
+    }
+}
+func has_flag(a, name) (b) {
+    b = false
+    i := 0
+    for i < len(a) { if a[i] == name { b = true }  i = i + 1 }
+}
+
+func roam_home() (p) {
+    p = env("HOME") + "/.roam"
+    mkdir(p)
+}
+func db_path(jobid) (p) { p = roam_home() + "/" + jobid + ".db" }
+
+func write_last(jobid) { write_file(roam_home() + "/last", jobid) }
+func resolve_id(idarg) (jobid) {
+    jobid = idarg
+    if idarg == "last" { jobid = trim(read_file(roam_home() + "/last")) }
+}
+
+// ---- storage ------------------------------------------------------------------
+
+func open_db(path) (db) {
+    db = sqlite_open(path)
+    sqlite_exec(db, "PRAGMA journal_mode=WAL")
+    sqlite_exec(db, "PRAGMA busy_timeout=5000")
+}
+func ensure_schema(db) {
+    sqlite_exec(db, "CREATE TABLE IF NOT EXISTS state (k TEXT PRIMARY KEY, v TEXT)")
+    sqlite_exec(db, "CREATE TABLE IF NOT EXISTS journal (id INTEGER PRIMARY KEY AUTOINCREMENT, ts INTEGER, kind TEXT, msg TEXT)")
+    sqlite_exec(db, "CREATE TABLE IF NOT EXISTS mailbox (id INTEGER PRIMARY KEY AUTOINCREMENT, ts INTEGER, consumed INTEGER DEFAULT 0, cmd TEXT, arg TEXT)")
+}
+func state_set(db, k, v) {
+    sqlite_exec(db, "INSERT OR REPLACE INTO state (k, v) VALUES (?, ?)", []string{k, v})
+}
+func state_get(db, k) (v) {
+    v = ""
+    rows := sqlite_query(db, "SELECT v FROM state WHERE k = ?", []string{k})
+    kvs := parse(rows, []KV{})
+    if len(kvs) > 0 { v = kvs[0].v }
+}
+func journal(db, kind, msg) {
+    sqlite_exec(db, "INSERT INTO journal (ts, kind, msg) VALUES (?, ?, ?)", []string{str(now()), kind, msg})
+}
+func mailbox_put(db, cmd, arg) {
+    sqlite_exec(db, "INSERT INTO mailbox (ts, consumed, cmd, arg) VALUES (?, 0, ?, ?)", []string{str(now()), cmd, arg})
+}
+
+// ---- worker -------------------------------------------------------------------
+
+// drain_mailbox applies every unconsumed steering message at a safe checkpoint.
+func drain_mailbox(db) {
+    rows := sqlite_query(db, "SELECT id, cmd, arg FROM mailbox WHERE consumed = 0 ORDER BY id")
+    ms := parse(rows, []MRow{})
+    for _, m := range ms {
+        if m.cmd == "pause"  { state_set(db, "status", "paused")   journal(db, "control", "paused") }
+        if m.cmd == "resume" { state_set(db, "status", "running")  journal(db, "control", "resumed") }
+        if m.cmd == "stop"   { state_set(db, "status", "stopped")  journal(db, "control", "stop requested") }
+        if m.cmd == "note"   { journal(db, "steer", m.arg) }
+        sqlite_exec(db, "UPDATE mailbox SET consumed = 1 WHERE id = ?", []string{str(m.id)})
+    }
+}
+
+func cmd_work(a) {
+    if len(a) < 3 { write(2, "roam _work: needs <jobid>\n")  exit(64) }
+    jobid := a[2]
+    db := open_db(db_path(jobid))
+    ensure_schema(db)
+    journal(db, "system", "worker started")
+    state_set(db, "status", "running")
+    every := atoi(state_get(db, "every"))   // seconds (user unit)
+    if every < 1 { every = 10 }
+    naptime := every * 1000                  // sleep() is milliseconds
+    done := 0
+    for done == 0 {
+        drain_mailbox(db)
+        st := state_get(db, "status")
+        if st == "stopped" {
+            journal(db, "system", "worker stopped")
+            done = 1
+        } else {
+            if st != "paused" {
+                // one unit of (trivial, skeleton) work
+                tick := atoi(state_get(db, "tick")) + 1
+                state_set(db, "tick", str(tick))
+                journal(db, "work", "tick " + str(tick))
+            }
+            sleep(naptime)
+        }
+    }
+    sqlite_close(db)
+}
+
+// ---- controller commands ------------------------------------------------------
+
+func cmd_send(a) {
+    to := flag(a, "--to", "")
+    goal := flag(a, "--goal", "")
+    every := flag(a, "--every", "10")
+    local := has_flag(a, "--local")
+    jobid := to_hex(rand_bytes(4))
+
+    db := open_db(db_path(jobid))
+    ensure_schema(db)
+    state_set(db, "status", "running")
+    state_set(db, "goal", goal)
+    state_set(db, "every", every)
+    state_set(db, "tick", "0")
+    state_set(db, "host", to)
+    state_set(db, "started", str(now()))
+    journal(db, "system", "job created (goal=" + goal + ")")
+    sqlite_close(db)
+    write_last(jobid)
+
+    if local {
+        self := args()[0]
+        logp := roam_home() + "/" + jobid + ".log"
+        system("nohup " + self + " _work " + jobid + " >> " + logp + " 2>&1 &")
+        println("{\"ok\":true,\"jobid\":" + jstr(jobid) + ",\"mode\":\"local\",\"every\":" + every + "}")
+        return
+    }
+    write(2, "{\"ok\":false,\"error\":\"remote send lands in slice 1b — use --local for now\"}\n")
+    exit(70)
+}
+
+func cmd_status(a) {
+    if len(a) < 3 { write(2, "roam status: needs <jobid|last>\n")  exit(64) }
+    jobid := resolve_id(a[2])
+    db := open_db(db_path(jobid))
+    status := state_get(db, "status")
+    tick := state_get(db, "tick")
+    goal := state_get(db, "goal")
+    every := state_get(db, "every")
+    started := state_get(db, "started")
+    recent := sqlite_query(db, "SELECT id, ts, kind, msg FROM journal ORDER BY id DESC LIMIT 8")
+    sqlite_close(db)
+    if tick == "" { tick = "0" }
+    if every == "" { every = "0" }
+    if started == "" { started = "0" }
+    println("{\"jobid\":" + jstr(jobid) + ",\"status\":" + jstr(status) + ",\"tick\":" + tick + ",\"goal\":" + jstr(goal) + ",\"every\":" + every + ",\"started\":" + started + ",\"recent\":" + recent + "}")
+}
+
+func cmd_attach(a) {
+    if len(a) < 3 { write(2, "roam attach: needs <jobid|last>\n")  exit(64) }
+    jobid := resolve_id(a[2])
+    db := open_db(db_path(jobid))
+    write(2, "[attach " + jobid + "] streaming journal (Ctrl-C to detach)\n")
+    lastid := 0
+    done := 0
+    for done == 0 {
+        rows := sqlite_query(db, "SELECT id, ts, kind, msg FROM journal WHERE id > ? ORDER BY id", []string{str(lastid)})
+        js := parse(rows, []JRow{})
+        for _, j := range js {
+            // write(1,...) is an unbuffered fd write — a streaming view must show each
+            // line as it lands, not block-buffered until exit (println buffers when
+            // stdout isn't a TTY, so a killed `attach` would show nothing).
+            write(1, "[" + str(j.ts) + "] " + j.kind + ": " + j.msg + "\n")
+            lastid = j.id
+        }
+        st := state_get(db, "status")
+        if st == "stopped" {
+            write(2, "[attach] job stopped\n")
+            done = 1
+        } else {
+            sleep(1)
+        }
+    }
+    sqlite_close(db)
+}
+
+func cmd_steer(a) {
+    if len(a) < 4 { write(2, "roam steer: needs <jobid|last> <message>\n")  exit(64) }
+    jobid := resolve_id(a[2])
+    parts := []string{}
+    i := 3
+    for i < len(a) { parts = append(parts, a[i])  i = i + 1 }
+    msg := join(parts, " ")
+    db := open_db(db_path(jobid))
+    mailbox_put(db, "note", msg)
+    sqlite_close(db)
+    println("{\"ok\":true,\"jobid\":" + jstr(jobid) + ",\"steered\":" + jstr(msg) + "}")
+}
+
+func cmd_ctl(a, cmd) {
+    if len(a) < 3 { write(2, "roam " + cmd + ": needs <jobid|last>\n")  exit(64) }
+    jobid := resolve_id(a[2])
+    db := open_db(db_path(jobid))
+    mailbox_put(db, cmd, "")
+    sqlite_close(db)
+    println("{\"ok\":true,\"jobid\":" + jstr(jobid) + ",\"cmd\":" + jstr(cmd) + "}")
+}
+
+func usage() {
+    write(2, "roam — leave a working agent on a remote box\n")
+    write(2, "usage:\n")
+    write(2, "  roam send --to <host> --goal <text> [--every <secs>] [--local]\n")
+    write(2, "  roam status <jobid|last>\n")
+    write(2, "  roam attach <jobid|last>\n")
+    write(2, "  roam steer  <jobid|last> <message>\n")
+    write(2, "  roam pause|resume|stop <jobid|last>\n")
+}
+
+func main() {
+    a := args()
+    if len(a) < 2 { usage()  exit(64) }
+    cmd := a[1]
+    if cmd == "send"   { cmd_send(a)    return }
+    if cmd == "_work"  { cmd_work(a)    return }
+    if cmd == "status" { cmd_status(a)  return }
+    if cmd == "attach" { cmd_attach(a)  return }
+    if cmd == "steer"  { cmd_steer(a)   return }
+    if cmd == "pause"  { cmd_ctl(a, "pause")   return }
+    if cmd == "resume" { cmd_ctl(a, "resume")  return }
+    if cmd == "stop"   { cmd_ctl(a, "stop")    return }
+    if cmd == "help"   { usage()  return }
+    write(2, "roam: unknown command: " + cmd + "\n")
+    usage()
+    exit(64)
+}
