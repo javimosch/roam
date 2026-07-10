@@ -116,32 +116,36 @@ func mailbox_put(db, cmd, arg) {
     sqlite_exec(db, "INSERT INTO mailbox (ts, consumed, cmd, arg) VALUES (?, 0, ?, ?)", []string{str(now()), cmd, arg})
 }
 
-// init_job creates a fresh job's DB + initial state. Same code path locally and on the
-// remote (called by _boot), so a job looks identical wherever it runs.
-func init_job(jobid, goal, every, host, kind, provider, model, maxiter, tokbudget, allow_shell, confirm, maxdenials, apibase, key) {
+// init_job creates a fresh job's DB + initial state, reading all config from the CLI args
+// `a` (via the cfg_* helpers) so it's one code path locally and on the remote (_boot) —
+// and adding a new flag is a one-liner, not a growing positional signature.
+func init_job(jobid, goal, every, host, a) {
     db := open_db(db_path(jobid))
     ensure_schema(db)
     state_set(db, "status", "running")
     state_set(db, "goal", goal)
     state_set(db, "every", every)
-    state_set(db, "tick", "0")
     state_set(db, "host", host)
     state_set(db, "started", str(now()))
-    state_set(db, "kind", kind)              // "agent" (LLM loop) | "tick" (skeleton demo)
-    state_set(db, "provider", provider)      // "anthropic" | "openai" (OpenAI-compatible)
-    state_set(db, "model", model)
-    state_set(db, "maxiter", maxiter)
-    state_set(db, "tokbudget", tokbudget)
-    state_set(db, "allow_shell", allow_shell)
-    state_set(db, "confirm", confirm)        // "1" -> destructive shell cmds park for approval
-    state_set(db, "maxdenials", maxdenials)  // deny budget: N denials -> auto-halt
-    state_set(db, "denials", "0")
-    state_set(db, "pending", "")
-    state_set(db, "api_base", apibase)
-    state_set(db, "api_key", key)            // job-local secret (own VM); a hardening TODO
+    state_set(db, "tick", "0")
     state_set(db, "iters", "0")
     state_set(db, "tokens", "0")
-    journal(db, "system", "job created (kind=" + kind + ", goal=" + goal + ")")
+    state_set(db, "kind", cfg_kind(a))            // "agent" (LLM loop) | "tick" (skeleton demo)
+    state_set(db, "provider", cfg_provider(a))    // "anthropic" | "openai" (OpenAI-compatible)
+    state_set(db, "model", cfg_model(a))
+    state_set(db, "maxiter", cfg_maxiter(a))
+    state_set(db, "tokbudget", cfg_tokens(a))
+    state_set(db, "allow_shell", cfg_shell(a))
+    state_set(db, "confirm", cfg_confirm(a))      // "1" -> destructive shell cmds park for approval
+    state_set(db, "maxdenials", cfg_maxdenials(a))// deny budget: N denials -> auto-halt
+    state_set(db, "denials", "0")
+    state_set(db, "verify", cfg_verify(a))        // "1" -> a `finish` is checked before it's accepted
+    state_set(db, "maxverify", cfg_maxverify(a))  // verify budget: N failed verifies -> halt
+    state_set(db, "vfails", "0")
+    state_set(db, "pending", "")
+    state_set(db, "api_base", cfg_apibase(a))
+    state_set(db, "api_key", get_key())           // job-local secret (own VM); a hardening TODO
+    journal(db, "system", "job created (kind=" + cfg_kind(a) + ", goal=" + goal + ")")
     sqlite_close(db)
 }
 // spawn_worker detaches the worker: setsid + closed stdin + log redirect, so it survives
@@ -315,6 +319,84 @@ func wait_for_approval(db, cmd) (decision) {
     journal(db, "confirm", "denied by operator (" + str(denials) + "/" + str(maxd) + ")")
 }
 
+// judge_call makes a single, tool-less LLM call for the active provider and returns the
+// response text — the independent second opinion used by the goal-verify pass.
+// judge_call makes a single, tool-less LLM call for the active provider and returns the
+// response text (empty string on any error/empty content — the caller treats that as
+// inconclusive, never as a failure).
+func judge_call(db, sys, usr) (txt) {
+    txt = ""
+    key := state_get(db, "api_key")
+    model := state_get(db, "model")
+    apibase := state_get(db, "api_base")
+    if state_get(db, "provider") == "openai" {
+        body := "{\"model\":" + jstr(model) + ",\"max_tokens\":500,\"messages\":[{\"role\":\"system\",\"content\":" + jstr(sys) + "},{\"role\":\"user\",\"content\":" + jstr(usr) + "}]}"
+        hdrs := []string{"Authorization: Bearer " + key, "content-type: application/json"}
+        st, resp := http_post_retry(apibase + "/chat/completions", hdrs, body)
+        if st != 200 { return txt }
+        c, _ := json_get(resp, ".choices[0].message.content")
+        txt = junquote(c)
+        if txt == "" || txt == "null" {   // some models put the answer in `reasoning`
+            r, _ := json_get(resp, ".choices[0].message.reasoning")
+            txt = junquote(r)
+        }
+        if txt == "null" { txt = "" }
+        return txt
+    }
+    body := "{\"model\":" + jstr(model) + ",\"max_tokens\":500,\"system\":" + jstr(sys) + ",\"messages\":[{\"role\":\"user\",\"content\":" + jstr(usr) + "}]}"
+    st, resp := call_api(apibase + "/v1/messages", key, body)
+    if st != 200 { return txt }
+    c, _ := json_get(resp, ".content[0].text")
+    txt = junquote(c)
+    if txt == "null" { txt = "" }
+}
+
+// verify_goal is the goal-verify pass: an independent judge decides whether the goal was
+// genuinely met — from EVIDENCE (the actual workdir listing + the action log), not the
+// agent's self-report. Returns "pass" | "fail" | "inconclusive". It is deliberately
+// FAIL-OPEN: only a confident explicit "VERDICT: FAIL" blocks the finish; an empty or
+// unparseable verdict (a flaky/incapable judge model) is "inconclusive" and must NOT
+// block a completing agent — a broken verifier should never override real work.
+func verify_goal(db, workdir, goal, claim) (verdict) {
+    verdict = "inconclusive"
+    lf := workdir + "/.roam_verify_ls"
+    system("cd " + workdir + " && ls -la > " + lf + " 2>&1")
+    listing := first_n(read_file(lf), 2500)
+    jlog := first_n(sqlite_query(db, "SELECT kind, msg FROM journal WHERE kind IN ('llm', 'tool', 'confirm') ORDER BY id DESC LIMIT 25"), 3000)
+    sys := "You are a strict, independent verifier. You are given a GOAL, the agent's completion CLAIM, and EVIDENCE about the actual resulting state (a listing of the working directory and a log of the actions the agent took). Judge ONLY from the evidence whether the goal was genuinely and fully accomplished — do NOT take the agent's claim at face value. Reply with EXACTLY one line: 'VERDICT: PASS - <one-sentence reason>' if the goal is fully met, otherwise 'VERDICT: FAIL - <one-sentence reason naming what is missing>'."
+    usr := "GOAL:\n" + goal + "\n\nAGENT CLAIM:\n" + claim + "\n\nWORKDIR LISTING:\n" + listing + "\n\nACTION LOG (most recent first, JSON):\n" + jlog + "\n\nYour verdict line:"
+    txt := judge_call(db, sys, usr)
+    up := to_upper(txt)
+    if contains(up, "VERDICT: PASS") { verdict = "pass" } else {
+        if contains(up, "VERDICT: FAIL") { verdict = "fail" }
+    }
+    journal(db, "verify", "verdict=" + verdict + ": " + first_n(txt, 200))
+}
+
+// handle_finish decides what a `finish` tool call means. --verify off: accepted as-is.
+// --verify on: pass -> accept; inconclusive -> accept (fail-open) with a note; fail ->
+// "not done, keep working" (another shot) until the verify budget halts the job.
+// Returns (tool_result_text, done) — done==1 means accept the finish.
+func handle_finish(db, workdir, summary) (result, done) {
+    done = 0
+    if state_get(db, "verify") != "1" { done = 1  result = summary  return result, done }
+    v := verify_goal(db, workdir, state_get(db, "goal"), summary)
+    if v == "pass" { done = 1  result = "Goal verified."  return result, done }
+    if v == "inconclusive" { done = 1  result = "Finish accepted (verifier inconclusive)."  journal(db, "verify", "inconclusive verdict — accepting finish (fail-open)")  return result, done }
+    // fail
+    vf := atoi(state_get(db, "vfails")) + 1
+    state_set(db, "vfails", str(vf))
+    maxv := atoi(state_get(db, "maxverify"))
+    if maxv < 1 { maxv = 2 }
+    if vf >= maxv {
+        state_set(db, "status", "halted")
+        journal(db, "verify", "verify budget exhausted (" + str(vf) + "/" + str(maxv) + ") — halting")
+        result = "Verification failed repeatedly; the verify budget is exhausted and the job is halting."
+        return result, done
+    }
+    result = "NOT DONE — an independent verification found the goal is not satisfied. Keep working to fully satisfy the goal, then call finish again."
+}
+
 // build_tools_json is the Anthropic `tools` array. run_shell is present only
 // when the job was dispatched with --allow-shell (default: file ops only).
 func build_tools_json(allow_shell) (t) {
@@ -484,7 +566,11 @@ func agent_loop(db, jobid) {
                     id := junquote(tid)
                     nm := junquote(tnm)
                     res, iserr := exec_tool(db, nm, arg, workdir, allow_shell)
-                    if nm == "finish" { finished = 1  finishmsg = res }
+                    if nm == "finish" {
+                        fres, fdone := handle_finish(db, workdir, res)
+                        res = fres
+                        if fdone == 1 { finished = 1  finishmsg = res }
+                    }
                     errflag := "false"
                     if iserr == 1 { errflag = "true" }
                     results = append(results, "{\"type\":\"tool_result\",\"tool_use_id\":" + jstr(id) + ",\"content\":" + jstr(res) + ",\"is_error\":" + errflag + "}")
@@ -589,7 +675,11 @@ func agent_loop_openai(db, jobid) {
                 nm := junquote(nmq)
                 argsjson := junquote(argq)   // args arrive as a JSON string -> decode to the object
                 res, iserr := exec_tool(db, nm, argsjson, workdir, allow_shell)
-                if nm == "finish" { finished = 1  finishmsg = res }
+                if nm == "finish" {
+                    fres, fdone := handle_finish(db, workdir, res)
+                    res = fres
+                    if fdone == 1 { finished = 1  finishmsg = res }
+                }
                 _ = iserr
                 toolmsgs = append(toolmsgs, "{\"role\":\"tool\",\"tool_call_id\":" + jstr(id) + ",\"content\":" + jstr(res) + "}")
                 ti = ti + 1
@@ -666,6 +756,8 @@ func cfg_kind(a) (v) { v = "agent"  if has_flag(a, "--tick") { v = "tick" } }
 func cfg_provider(a) (v) { v = flag(a, "--provider", "anthropic") }
 func cfg_confirm(a) (v) { v = "0"  if has_flag(a, "--confirm") { v = "1" } }
 func cfg_maxdenials(a) (v) { v = flag(a, "--max-denials", "3") }
+func cfg_verify(a) (v) { v = "0"  if has_flag(a, "--verify") { v = "1" } }
+func cfg_maxverify(a) (v) { v = flag(a, "--max-verify", "2") }
 // get_key: the provider-neutral ROAM_API_KEY wins, else ANTHROPIC_API_KEY.
 func get_key() (k) { k = env("ROAM_API_KEY")  if k == "" { k = env("ANTHROPIC_API_KEY") } }
 
@@ -677,11 +769,12 @@ func cmd_send(a) {
     model := cfg_model(a)  maxiter := cfg_maxiter(a)  tokbudget := cfg_tokens(a)
     apibase := cfg_apibase(a)  allow_shell := cfg_shell(a)  kind := cfg_kind(a)
     provider := cfg_provider(a)  confirm := cfg_confirm(a)  maxdenials := cfg_maxdenials(a)
+    verify := cfg_verify(a)  maxverify := cfg_maxverify(a)
     key := get_key()
     jobid := to_hex(rand_bytes(4))   // decided by the controller, shipped to the remote
 
     if local {
-        init_job(jobid, goal, every, "local", kind, provider, model, maxiter, tokbudget, allow_shell, confirm, maxdenials, apibase, key)
+        init_job(jobid, goal, every, "local", a)
         spawn_worker(jobid)
         write_last(jobid)
         println("{\"ok\":true,\"mode\":\"local\",\"kind\":" + jstr(kind) + ",\"jobid\":" + jstr(jobid) + "}")
@@ -700,6 +793,7 @@ func cmd_send(a) {
     cfgflags := " --provider " + provider + " --model " + model + " --max-iters " + maxiter + " --tokens " + tokbudget + " --api-base " + apibase
     if allow_shell == "1" { cfgflags = cfgflags + " --allow-shell" }
     if confirm == "1" { cfgflags = cfgflags + " --confirm --max-denials " + maxdenials }
+    if verify == "1" { cfgflags = cfgflags + " --verify --max-verify " + maxverify }
     if kind == "tick" { cfgflags = cfgflags + " --tick" }
     bootcmd := "ssh " + to + " 'ROAM_API_KEY=" + key + " ~/.roam/roam _boot " + jobid + " " + every + cfgflags + " --goal " + goal + "' >/dev/null"
     // _boot inits the job DB + detaches the worker on the remote; its stdout is
@@ -719,7 +813,7 @@ func cmd_boot(a) {
     jobid := a[2]
     every := a[3]
     goal := flag_rest(a, "--goal")
-    init_job(jobid, goal, every, "self", cfg_kind(a), cfg_provider(a), cfg_model(a), cfg_maxiter(a), cfg_tokens(a), cfg_shell(a), cfg_confirm(a), cfg_maxdenials(a), cfg_apibase(a), get_key())
+    init_job(jobid, goal, every, "self", a)
     spawn_worker(jobid)
     println("{\"ok\":true,\"jobid\":" + jstr(jobid) + "}")
 }
@@ -738,6 +832,7 @@ func cmd_status(a) {
     tick := state_get(db, "tick")
     pending := state_get(db, "pending")
     denials := state_get(db, "denials")
+    vfails := state_get(db, "vfails")
     recent := sqlite_query(db, "SELECT id, ts, kind, msg FROM journal ORDER BY id DESC LIMIT 8")
     sqlite_close(db)
     if iters == "" { iters = "0" }
@@ -746,8 +841,9 @@ func cmd_status(a) {
     if started == "" { started = "0" }
     if kind == "" { kind = "tick" }
     if denials == "" { denials = "0" }
+    if vfails == "" { vfails = "0" }
     // `pending` is the destructive command awaiting approval (status == "awaiting").
-    println("{\"jobid\":" + jstr(jobid) + ",\"status\":" + jstr(status) + ",\"kind\":" + jstr(kind) + ",\"goal\":" + jstr(goal) + ",\"iters\":" + iters + ",\"tokens\":" + tokens + ",\"denials\":" + denials + ",\"tick\":" + tick + ",\"started\":" + started + ",\"pending\":" + jstr(pending) + ",\"recent\":" + recent + "}")
+    println("{\"jobid\":" + jstr(jobid) + ",\"status\":" + jstr(status) + ",\"kind\":" + jstr(kind) + ",\"goal\":" + jstr(goal) + ",\"iters\":" + iters + ",\"tokens\":" + tokens + ",\"denials\":" + denials + ",\"verify_fails\":" + vfails + ",\"tick\":" + tick + ",\"started\":" + started + ",\"pending\":" + jstr(pending) + ",\"recent\":" + recent + "}")
 }
 
 func cmd_attach(a) {
@@ -812,6 +908,8 @@ func usage() {
     write(2, "           --max-iters <n>  --tokens <n>  --every <secs>\n")
     write(2, "    (--confirm parks destructive shell commands for approval;\n")
     write(2, "     --max-denials <n> auto-halts after n denials [default 3];\n")
+    write(2, "     --verify checks the goal (independent judge) before accepting finish,\n")
+    write(2, "       --max-verify <n> halts after n failed verifies [default 2];\n")
     write(2, "     agent mode reads the API key from ROAM_API_KEY or ANTHROPIC_API_KEY)\n")
     write(2, "  roam status  <host|jobid|last>\n")
     write(2, "  roam attach  <host|jobid|last>\n")

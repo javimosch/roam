@@ -55,7 +55,13 @@ roam stop   rbm21
   `roam deny` refuses it (the agent adapts), `roam stop` cancels. A **deny budget**
   (`--max-denials`, default 3) auto-halts a stubborn agent that keeps re-parking on
   destructive variants (it tried `sudo rm` after a denied `rm` in live testing), so it
-  self-terminates instead of parking forever. The append-only
+  self-terminates instead of parking forever. A **goal-verify pass** (`--verify`) sends a
+  `finish` to an independent judge that decides PASS/FAIL from *evidence* (the real workdir
+  listing + action log), not the agent's self-report — a FAIL turns finish into "not done,
+  keep working" (up to `--max-verify`, then halt), so the agent can't just claim success.
+  It is **fail-open**: a judge that can't render a clear verdict is `inconclusive` and
+  never blocks a completing agent (its teeth scale with the judge model's capability). The
+  append-only
   **journal** records every model turn, tool call, result, and token cost; the mailbox
   is the **stop / steer / approve / deny** channel, applied at loop checkpoints.
 
