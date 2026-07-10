@@ -64,10 +64,6 @@ func roam_home() (p) {
 func db_path(jobid) (p) { p = roam_home() + "/" + jobid + ".db" }
 
 func write_last(jobid) { write_file(roam_home() + "/last", jobid) }
-func resolve_id(idarg) (jobid) {
-    jobid = idarg
-    if idarg == "last" { jobid = trim(read_file(roam_home() + "/last")) }
-}
 
 // ---- storage ------------------------------------------------------------------
 
@@ -95,6 +91,53 @@ func journal(db, kind, msg) {
 }
 func mailbox_put(db, cmd, arg) {
     sqlite_exec(db, "INSERT INTO mailbox (ts, consumed, cmd, arg) VALUES (?, 0, ?, ?)", []string{str(now()), cmd, arg})
+}
+
+// init_job creates a fresh job's DB + initial state. Same code path locally and on the
+// remote (called by _boot), so a job looks identical wherever it runs.
+func init_job(jobid, goal, every, host) {
+    db := open_db(db_path(jobid))
+    ensure_schema(db)
+    state_set(db, "status", "running")
+    state_set(db, "goal", goal)
+    state_set(db, "every", every)
+    state_set(db, "tick", "0")
+    state_set(db, "host", host)
+    state_set(db, "started", str(now()))
+    journal(db, "system", "job created (goal=" + goal + ")")
+    sqlite_close(db)
+}
+// spawn_worker detaches the worker: setsid + closed stdin + log redirect, so it survives
+// its parent exiting (a local shell, or the ssh session that launched it via _boot).
+func spawn_worker(jobid) {
+    self := args()[0]
+    logp := roam_home() + "/" + jobid + ".log"
+    system("setsid " + self + " _work " + jobid + " </dev/null >> " + logp + " 2>&1 &")
+}
+
+// ---- target resolution: a control target is a local jobid or a remote host handle ----
+func hosts_path(h) (p) { p = roam_home() + "/hosts/" + h }
+// resolve_target maps a CLI target to (host, jobid, remote). `last` reads the last
+// dispatch; a name with a ~/.roam/hosts/<name> handle is remote; anything else is a
+// local jobid.
+func resolve_target(arg) (host, jobid, remote) {
+    host = ""
+    remote = 0
+    t := arg
+    if arg == "last" { t = trim(read_file(roam_home() + "/last")) }
+    hv := trim(read_file(hosts_path(t)))
+    if hv != "" {
+        host = t
+        jobid = hv
+        remote = 1
+        return host, jobid, remote
+    }
+    jobid = t
+}
+// remote_exec runs the SAME roam subcommand on the remote against its own journal; ssh
+// streams the remote's stdout/stderr straight back (so `attach` is live over the pipe).
+func remote_exec(host, sub, jobid, extra) (rc) {
+    rc = system("ssh " + host + " '~/.roam/roam " + sub + " " + jobid + extra + "'")
 }
 
 // ---- worker -------------------------------------------------------------------
@@ -149,34 +192,52 @@ func cmd_send(a) {
     goal := flag(a, "--goal", "")
     every := flag(a, "--every", "10")
     local := has_flag(a, "--local")
-    jobid := to_hex(rand_bytes(4))
-
-    db := open_db(db_path(jobid))
-    ensure_schema(db)
-    state_set(db, "status", "running")
-    state_set(db, "goal", goal)
-    state_set(db, "every", every)
-    state_set(db, "tick", "0")
-    state_set(db, "host", to)
-    state_set(db, "started", str(now()))
-    journal(db, "system", "job created (goal=" + goal + ")")
-    sqlite_close(db)
-    write_last(jobid)
+    jobid := to_hex(rand_bytes(4))   // decided by the controller, shipped to the remote
 
     if local {
-        self := args()[0]
-        logp := roam_home() + "/" + jobid + ".log"
-        system("nohup " + self + " _work " + jobid + " >> " + logp + " 2>&1 &")
-        println("{\"ok\":true,\"jobid\":" + jstr(jobid) + ",\"mode\":\"local\",\"every\":" + every + "}")
+        init_job(jobid, goal, every, "local")
+        spawn_worker(jobid)
+        write_last(jobid)
+        println("{\"ok\":true,\"mode\":\"local\",\"jobid\":" + jstr(jobid) + ",\"every\":" + every + "}")
         return
     }
-    write(2, "{\"ok\":false,\"error\":\"remote send lands in slice 1b — use --local for now\"}\n")
-    exit(70)
+
+    if to == "" { write(2, "{\"ok\":false,\"error\":\"--to <host> required (or --local)\"}\n")  exit(64) }
+    // self-replicate: ship this exact binary to the remote, then boot the job there.
+    self := args()[0]
+    if system("ssh " + to + " 'mkdir -p ~/.roam'") != 0 { write(2, "{\"ok\":false,\"error\":\"ssh " + to + " failed\"}\n")  exit(100) }
+    if system("scp -q " + self + " " + to + ":.roam/roam") != 0 { write(2, "{\"ok\":false,\"error\":\"scp to " + to + " failed\"}\n")  exit(100) }
+    system("ssh " + to + " 'chmod +x ~/.roam/roam'")
+    // _boot inits the job DB + detaches the worker, all on the remote. Its stdout (a
+    // confirmation JSON) is suppressed so the controller emits exactly one JSON answer.
+    if system("ssh " + to + " '~/.roam/roam _boot " + jobid + " " + every + " " + goal + "' >/dev/null") != 0 {
+        write(2, "{\"ok\":false,\"error\":\"remote boot failed\"}\n")  exit(100)
+    }
+    mkdir(roam_home() + "/hosts")
+    write_file(hosts_path(to), jobid)
+    write_file(roam_home() + "/last", to)
+    println("{\"ok\":true,\"mode\":\"remote\",\"host\":" + jstr(to) + ",\"jobid\":" + jstr(jobid) + ",\"every\":" + every + "}")
+}
+
+// _boot (remote-side): init the job and detach the worker. jobid + every are fixed args;
+// everything after is the goal text (joined), so multi-word goals survive ssh word-split.
+func cmd_boot(a) {
+    if len(a) < 4 { write(2, "roam _boot: needs <jobid> <every> <goal...>\n")  exit(64) }
+    jobid := a[2]
+    every := a[3]
+    parts := []string{}
+    i := 4
+    for i < len(a) { parts = append(parts, a[i])  i = i + 1 }
+    goal := join(parts, " ")
+    init_job(jobid, goal, every, "self")
+    spawn_worker(jobid)
+    println("{\"ok\":true,\"jobid\":" + jstr(jobid) + "}")
 }
 
 func cmd_status(a) {
-    if len(a) < 3 { write(2, "roam status: needs <jobid|last>\n")  exit(64) }
-    jobid := resolve_id(a[2])
+    if len(a) < 3 { write(2, "roam status: needs <host|jobid|last>\n")  exit(64) }
+    host, jobid, remote := resolve_target(a[2])
+    if remote == 1 { remote_exec(host, "status", jobid, "")  return }
     db := open_db(db_path(jobid))
     status := state_get(db, "status")
     tick := state_get(db, "tick")
@@ -192,8 +253,9 @@ func cmd_status(a) {
 }
 
 func cmd_attach(a) {
-    if len(a) < 3 { write(2, "roam attach: needs <jobid|last>\n")  exit(64) }
-    jobid := resolve_id(a[2])
+    if len(a) < 3 { write(2, "roam attach: needs <host|jobid|last>\n")  exit(64) }
+    host, jobid, remote := resolve_target(a[2])
+    if remote == 1 { remote_exec(host, "attach", jobid, "")  return }
     db := open_db(db_path(jobid))
     write(2, "[attach " + jobid + "] streaming journal (Ctrl-C to detach)\n")
     lastid := 0
@@ -220,12 +282,13 @@ func cmd_attach(a) {
 }
 
 func cmd_steer(a) {
-    if len(a) < 4 { write(2, "roam steer: needs <jobid|last> <message>\n")  exit(64) }
-    jobid := resolve_id(a[2])
+    if len(a) < 4 { write(2, "roam steer: needs <host|jobid|last> <message>\n")  exit(64) }
+    host, jobid, remote := resolve_target(a[2])
     parts := []string{}
     i := 3
     for i < len(a) { parts = append(parts, a[i])  i = i + 1 }
     msg := join(parts, " ")
+    if remote == 1 { remote_exec(host, "steer", jobid, " \"" + msg + "\"")  return }
     db := open_db(db_path(jobid))
     mailbox_put(db, "note", msg)
     sqlite_close(db)
@@ -233,8 +296,9 @@ func cmd_steer(a) {
 }
 
 func cmd_ctl(a, cmd) {
-    if len(a) < 3 { write(2, "roam " + cmd + ": needs <jobid|last>\n")  exit(64) }
-    jobid := resolve_id(a[2])
+    if len(a) < 3 { write(2, "roam " + cmd + ": needs <host|jobid|last>\n")  exit(64) }
+    host, jobid, remote := resolve_target(a[2])
+    if remote == 1 { remote_exec(host, cmd, jobid, "")  return }
     db := open_db(db_path(jobid))
     mailbox_put(db, cmd, "")
     sqlite_close(db)
@@ -256,6 +320,7 @@ func main() {
     if len(a) < 2 { usage()  exit(64) }
     cmd := a[1]
     if cmd == "send"   { cmd_send(a)    return }
+    if cmd == "_boot"  { cmd_boot(a)    return }
     if cmd == "_work"  { cmd_work(a)    return }
     if cmd == "status" { cmd_status(a)  return }
     if cmd == "attach" { cmd_attach(a)  return }
