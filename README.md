@@ -48,9 +48,19 @@ roam stop   rbm21
   `run_shell`. File tools are confined to a per-job workdir (`~/.roam/work/<jobid>/`);
   `..`/absolute paths are refused, and `run_shell` runs with that cwd.
 - **Trust layer** (what lets you actually walk away): **hard budgets** — `--max-iters`
-  and `--tokens` freeze the run (`status: halted`) the moment either is hit; the
-  append-only **journal** records every model turn, tool call, result, and token cost;
-  the mailbox is the **stop / steer** channel, applied at loop checkpoints.
+  and `--tokens` freeze the run (`status: halted`) the moment either is hit; a
+  **confirm-gate** (`--confirm`) parks destructive shell commands (`rm`, `dd`, `mkfs`,
+  `git push`, `DROP TABLE`, `shutdown`, pipe-to-shell, …) for async approval
+  (`status: awaiting`, the exact command in `pending`) — `roam approve` runs it,
+  `roam deny` refuses it (the agent adapts), `roam stop` cancels; the append-only
+  **journal** records every model turn, tool call, result, and token cost; the mailbox
+  is the **stop / steer / approve / deny** channel, applied at loop checkpoints.
+
+**roam is non-interactive by design — one interface for humans and agents.** Every
+command is one-shot (stdout = JSON, stderr = text, semantic exit codes); there's no TTY
+prompt. The confirm-gate is therefore *async*: the worker parks and a supervisor
+approves out-of-band. A human types `roam approve rbm21`; a supervising agent reads
+`pending` from `roam status` JSON and calls `roam approve rbm21`. Identical surface.
 - **Providers:** `--provider anthropic` (default; Anthropic Messages API) or
   `--provider openai` (any OpenAI-compatible endpoint — OpenRouter, etc. — via
   `--api-base`). Both speak the same tools/sandbox/budget machinery; only the wire shape

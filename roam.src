@@ -118,7 +118,7 @@ func mailbox_put(db, cmd, arg) {
 
 // init_job creates a fresh job's DB + initial state. Same code path locally and on the
 // remote (called by _boot), so a job looks identical wherever it runs.
-func init_job(jobid, goal, every, host, kind, provider, model, maxiter, tokbudget, allow_shell, apibase, key) {
+func init_job(jobid, goal, every, host, kind, provider, model, maxiter, tokbudget, allow_shell, confirm, apibase, key) {
     db := open_db(db_path(jobid))
     ensure_schema(db)
     state_set(db, "status", "running")
@@ -133,6 +133,8 @@ func init_job(jobid, goal, every, host, kind, provider, model, maxiter, tokbudge
     state_set(db, "maxiter", maxiter)
     state_set(db, "tokbudget", tokbudget)
     state_set(db, "allow_shell", allow_shell)
+    state_set(db, "confirm", confirm)        // "1" -> destructive shell cmds park for approval
+    state_set(db, "pending", "")
     state_set(db, "api_base", apibase)
     state_set(db, "api_key", key)            // job-local secret (own VM); a hardening TODO
     state_set(db, "iters", "0")
@@ -249,6 +251,48 @@ func safe_path(workdir, p) (full, ok) {
     full = workdir + "/" + p
 }
 
+// is_destructive: does a shell command look data-destroying or system-altering? A
+// deliberately over-eager classifier — false positives just ask for approval (safe);
+// the cost of a false negative (an un-gated `rm -rf`) is much higher. The harness owns
+// this decision, not the model (which doesn't know your security boundary).
+func is_destructive(cmd) (b) {
+    b = 0
+    lc := to_lower(cmd)
+    // rm as a real command word (not "confirm"/"perform", which also contain "rm ")
+    if has_prefix(lc, "rm ") { b = 1  return b }
+    if contains(lc, " rm ") || contains(lc, "rm -") || contains(lc, ";rm ") || contains(lc, "&rm ") || contains(lc, "|rm ") { b = 1  return b }
+    needles := []string{"rmdir", "dd if=", "mkfs", "shred", "truncate -", "> /", ">/", "git push", "reset --hard", "git clean -", "drop table", "drop database", "delete from", "shutdown", "reboot", "poweroff", "kill ", "pkill", "killall", "chmod -r", "chown -r", "chmod 777", "| sh", "|sh", "| bash", "|bash", "systemctl stop", "systemctl disable", "systemctl mask", "systemctl restart", "userdel", "deluser", "crontab -r", "iptables ", "/dev/sd", "mkswap", "fdisk", "parted ", "wipefs"}
+    i := 0
+    for i < len(needles) { if contains(lc, needles[i]) { b = 1  return b }  i = i + 1 }
+}
+
+// wait_for_approval parks the worker on a destructive action and blocks (polling the
+// mailbox) until an operator approves/denies — or stops the job. This is the async
+// human-in-the-loop gate: roam is non-interactive, so approval is a mailbox message
+// (`roam approve|deny`), usable identically by a human or a supervising agent.
+func wait_for_approval(db, cmd) (decision) {
+    state_set(db, "pending", cmd)
+    state_set(db, "status", "awaiting")
+    journal(db, "confirm", "AWAITING APPROVAL for destructive command: " + first_n(cmd, 400))
+    decision = ""
+    for decision == "" {
+        rows := sqlite_query(db, "SELECT id, cmd, arg FROM mailbox WHERE consumed = 0 ORDER BY id")
+        ms := parse(rows, []MRow{})
+        for _, m := range ms {
+            if m.cmd == "approve" { decision = "approve" }
+            if m.cmd == "deny" { decision = "deny" }
+            if m.cmd == "stop" { decision = "stop" }
+            sqlite_exec(db, "UPDATE mailbox SET consumed = 1 WHERE id = ?", []string{str(m.id)})
+        }
+        if decision == "" { sleep(1000) }
+    }
+    state_set(db, "pending", "")
+    if decision == "stop" { state_set(db, "status", "stopped")  journal(db, "confirm", "stopped by operator during approval wait") } else {
+        state_set(db, "status", "running")
+        journal(db, "confirm", decision + "d by operator")
+    }
+}
+
 // build_tools_json is the Anthropic `tools` array. run_shell is present only
 // when the job was dispatched with --allow-shell (default: file ops only).
 func build_tools_json(allow_shell) (t) {
@@ -271,6 +315,13 @@ func exec_tool(db, name, argsjson, workdir, allow_shell) (result, iserr) {
         if allow_shell == 0 { result = "run_shell is disabled for this job (re-dispatch with --allow-shell to enable)"  iserr = 1  return result, iserr }
         cmdq, _ := json_get(argsjson, ".command")
         cmd := junquote(cmdq)
+        // confirm-gate: a destructive command parks for async operator approval.
+        if state_get(db, "confirm") == "1" && is_destructive(cmd) == 1 {
+            dec := wait_for_approval(db, cmd)
+            if dec == "deny" { journal(db, "tool", "run_shell DENIED: " + first_n(cmd, 200))  result = "The operator DENIED this command. Do not retry it — choose a different, non-destructive approach."  return result, iserr }
+            if dec == "stop" { result = "run cancelled: the job was stopped during approval"  iserr = 1  return result, iserr }
+            // approved -> fall through and execute
+        }
         journal(db, "tool", "run_shell: " + first_n(cmd, 200))
         outf := workdir + "/.roam_tool_out"
         rc := system("cd " + workdir + " && (" + cmd + ") > " + outf + " 2>&1")
@@ -420,6 +471,7 @@ func agent_loop(db, jobid) {
         }
         done = 0   // reset the inner-loop sentinel
 
+        if is_terminal(state_get(db, "status")) == 1 { sqlite_close(db)  return }   // stopped during an approval wait
         if finished == 1 { journal(db, "system", "agent finished: " + finishmsg)  state_set(db, "status", "done")  sqlite_close(db)  return }
 
         stop, _ := json_get(resp, ".stop_reason")
@@ -522,6 +574,8 @@ func agent_loop_openai(db, jobid) {
         }
         done = 0
 
+        if is_terminal(state_get(db, "status")) == 1 { sqlite_close(db)  return }   // stopped during an approval wait
+
         i := 0
         for i < len(toolmsgs) { msgs = msgs + "," + toolmsgs[i]  i = i + 1 }
 
@@ -587,6 +641,7 @@ func cfg_apibase(a) (v) { v = flag(a, "--api-base", "https://api.anthropic.com")
 func cfg_shell(a) (v) { v = "0"  if has_flag(a, "--allow-shell") { v = "1" } }
 func cfg_kind(a) (v) { v = "agent"  if has_flag(a, "--tick") { v = "tick" } }
 func cfg_provider(a) (v) { v = flag(a, "--provider", "anthropic") }
+func cfg_confirm(a) (v) { v = "0"  if has_flag(a, "--confirm") { v = "1" } }
 // get_key: the provider-neutral ROAM_API_KEY wins, else ANTHROPIC_API_KEY.
 func get_key() (k) { k = env("ROAM_API_KEY")  if k == "" { k = env("ANTHROPIC_API_KEY") } }
 
@@ -597,12 +652,12 @@ func cmd_send(a) {
     local := has_flag(a, "--local")
     model := cfg_model(a)  maxiter := cfg_maxiter(a)  tokbudget := cfg_tokens(a)
     apibase := cfg_apibase(a)  allow_shell := cfg_shell(a)  kind := cfg_kind(a)
-    provider := cfg_provider(a)
+    provider := cfg_provider(a)  confirm := cfg_confirm(a)
     key := get_key()
     jobid := to_hex(rand_bytes(4))   // decided by the controller, shipped to the remote
 
     if local {
-        init_job(jobid, goal, every, "local", kind, provider, model, maxiter, tokbudget, allow_shell, apibase, key)
+        init_job(jobid, goal, every, "local", kind, provider, model, maxiter, tokbudget, allow_shell, confirm, apibase, key)
         spawn_worker(jobid)
         write_last(jobid)
         println("{\"ok\":true,\"mode\":\"local\",\"kind\":" + jstr(kind) + ",\"jobid\":" + jstr(jobid) + "}")
@@ -620,6 +675,7 @@ func cmd_send(a) {
     // of the arg list). --goal MUST be last (flag_rest consumes the remainder as goal).
     cfgflags := " --provider " + provider + " --model " + model + " --max-iters " + maxiter + " --tokens " + tokbudget + " --api-base " + apibase
     if allow_shell == "1" { cfgflags = cfgflags + " --allow-shell" }
+    if confirm == "1" { cfgflags = cfgflags + " --confirm" }
     if kind == "tick" { cfgflags = cfgflags + " --tick" }
     bootcmd := "ssh " + to + " 'ROAM_API_KEY=" + key + " ~/.roam/roam _boot " + jobid + " " + every + cfgflags + " --goal " + goal + "' >/dev/null"
     // _boot inits the job DB + detaches the worker on the remote; its stdout is
@@ -639,7 +695,7 @@ func cmd_boot(a) {
     jobid := a[2]
     every := a[3]
     goal := flag_rest(a, "--goal")
-    init_job(jobid, goal, every, "self", cfg_kind(a), cfg_provider(a), cfg_model(a), cfg_maxiter(a), cfg_tokens(a), cfg_shell(a), cfg_apibase(a), get_key())
+    init_job(jobid, goal, every, "self", cfg_kind(a), cfg_provider(a), cfg_model(a), cfg_maxiter(a), cfg_tokens(a), cfg_shell(a), cfg_confirm(a), cfg_apibase(a), get_key())
     spawn_worker(jobid)
     println("{\"ok\":true,\"jobid\":" + jstr(jobid) + "}")
 }
@@ -656,6 +712,7 @@ func cmd_status(a) {
     iters := state_get(db, "iters")
     tokens := state_get(db, "tokens")
     tick := state_get(db, "tick")
+    pending := state_get(db, "pending")
     recent := sqlite_query(db, "SELECT id, ts, kind, msg FROM journal ORDER BY id DESC LIMIT 8")
     sqlite_close(db)
     if iters == "" { iters = "0" }
@@ -663,7 +720,8 @@ func cmd_status(a) {
     if tick == "" { tick = "0" }
     if started == "" { started = "0" }
     if kind == "" { kind = "tick" }
-    println("{\"jobid\":" + jstr(jobid) + ",\"status\":" + jstr(status) + ",\"kind\":" + jstr(kind) + ",\"goal\":" + jstr(goal) + ",\"iters\":" + iters + ",\"tokens\":" + tokens + ",\"tick\":" + tick + ",\"started\":" + started + ",\"recent\":" + recent + "}")
+    // `pending` is the destructive command awaiting approval (status == "awaiting").
+    println("{\"jobid\":" + jstr(jobid) + ",\"status\":" + jstr(status) + ",\"kind\":" + jstr(kind) + ",\"goal\":" + jstr(goal) + ",\"iters\":" + iters + ",\"tokens\":" + tokens + ",\"tick\":" + tick + ",\"started\":" + started + ",\"pending\":" + jstr(pending) + ",\"recent\":" + recent + "}")
 }
 
 func cmd_attach(a) {
@@ -723,14 +781,17 @@ func usage() {
     write(2, "roam — leave a working agent on a remote box\n")
     write(2, "usage:\n")
     write(2, "  roam send --to <host> [flags] --goal <text>   # dispatch an agent (--goal LAST)\n")
-    write(2, "    flags: --local  --allow-shell  --tick  --model <id>\n")
+    write(2, "    flags: --local  --allow-shell  --confirm  --tick  --model <id>\n")
     write(2, "           --provider anthropic|openai  --api-base <url>\n")
     write(2, "           --max-iters <n>  --tokens <n>  --every <secs>\n")
-    write(2, "    (agent mode reads the API key from ROAM_API_KEY or ANTHROPIC_API_KEY)\n")
-    write(2, "  roam status <host|jobid|last>\n")
-    write(2, "  roam attach <host|jobid|last>\n")
-    write(2, "  roam steer  <host|jobid|last> <message>\n")
-    write(2, "  roam stop   <host|jobid|last>\n")
+    write(2, "    (--confirm parks destructive shell commands for approval;\n")
+    write(2, "     agent mode reads the API key from ROAM_API_KEY or ANTHROPIC_API_KEY)\n")
+    write(2, "  roam status  <host|jobid|last>\n")
+    write(2, "  roam attach  <host|jobid|last>\n")
+    write(2, "  roam steer   <host|jobid|last> <message>\n")
+    write(2, "  roam approve <host|jobid|last>     # allow a parked destructive command\n")
+    write(2, "  roam deny    <host|jobid|last>     # refuse it (agent adapts)\n")
+    write(2, "  roam stop    <host|jobid|last>\n")
 }
 
 func main() {
@@ -746,6 +807,8 @@ func main() {
     if cmd == "pause"  { cmd_ctl(a, "pause")   return }
     if cmd == "resume" { cmd_ctl(a, "resume")  return }
     if cmd == "stop"   { cmd_ctl(a, "stop")    return }
+    if cmd == "approve" { cmd_ctl(a, "approve")  return }
+    if cmd == "deny"    { cmd_ctl(a, "deny")     return }
     if cmd == "help"   { usage()  return }
     write(2, "roam: unknown command: " + cmd + "\n")
     usage()
