@@ -267,7 +267,10 @@ func is_destructive(cmd) (b) {
     // rm as a real command word (not "confirm"/"perform", which also contain "rm ")
     if has_prefix(lc, "rm ") { b = 1  return b }
     if contains(lc, " rm ") || contains(lc, "rm -") || contains(lc, ";rm ") || contains(lc, "&rm ") || contains(lc, "|rm ") { b = 1  return b }
-    needles := []string{"rmdir", "dd if=", "mkfs", "shred", "truncate -", "> /", ">/", "git push", "reset --hard", "git clean -", "drop table", "drop database", "delete from", "shutdown", "reboot", "poweroff", "kill ", "pkill", "killall", "chmod -r", "chown -r", "chmod 777", "| sh", "|sh", "| bash", "|bash", "systemctl stop", "systemctl disable", "systemctl mask", "systemctl restart", "userdel", "deluser", "crontab -r", "iptables ", "/dev/sd", "mkswap", "fdisk", "parted ", "wipefs"}
+    // NOTE: no bare ">/" / "> /" redirect needle — it matches benign `2>/dev/null` and
+    // every stderr/stdout suppression, which made --confirm park on almost everything.
+    // Writes that clobber a real system path show up via the specific needles below.
+    needles := []string{"rmdir", "dd if=", "mkfs", "shred", "truncate -", "git push", "reset --hard", "git clean -", "drop table", "drop database", "delete from", "shutdown", "reboot", "poweroff", "kill ", "pkill", "killall", "chmod -r", "chown -r", "chmod 777", "| sh", "|sh", "| bash", "|bash", "systemctl stop", "systemctl disable", "systemctl mask", "systemctl restart", "userdel", "deluser", "crontab -r", "iptables ", "/dev/sd", "mkswap", "fdisk", "parted ", "wipefs", "> /etc", "> /usr", "> /boot", "> /var", "> /root", ">/etc", ">/usr", ">/boot"}
     i := 0
     for i < len(needles) { if contains(lc, needles[i]) { b = 1  return b }  i = i + 1 }
 }
@@ -795,7 +798,9 @@ func cmd_send(a) {
     if confirm == "1" { cfgflags = cfgflags + " --confirm --max-denials " + maxdenials }
     if verify == "1" { cfgflags = cfgflags + " --verify --max-verify " + maxverify }
     if kind == "tick" { cfgflags = cfgflags + " --tick" }
-    bootcmd := "ssh " + to + " 'ROAM_API_KEY=" + key + " ~/.roam/roam _boot " + jobid + " " + every + cfgflags + " --goal " + goal + "' >/dev/null"
+    // the goal is base64'd so quotes/parens/any shell-special char survive the ssh
+    // single-quote wrapper (a raw --goal with a ' in it breaks the remote command).
+    bootcmd := "ssh " + to + " 'ROAM_API_KEY=" + key + " ~/.roam/roam _boot " + jobid + " " + every + cfgflags + " --goal-b64 " + base64_encode(goal) + "' >/dev/null"
     // _boot inits the job DB + detaches the worker on the remote; its stdout is
     // suppressed so the controller emits exactly one JSON answer.
     if system(bootcmd) != 0 { write(2, "{\"ok\":false,\"error\":\"remote boot failed\"}\n")  exit(100) }
@@ -813,6 +818,8 @@ func cmd_boot(a) {
     jobid := a[2]
     every := a[3]
     goal := flag_rest(a, "--goal")
+    gb := flag(a, "--goal-b64", "")
+    if gb != "" { goal = base64_decode(gb) }   // remote path ships the goal base64'd
     init_job(jobid, goal, every, "self", a)
     spawn_worker(jobid)
     println("{\"ok\":true,\"jobid\":" + jstr(jobid) + "}")
