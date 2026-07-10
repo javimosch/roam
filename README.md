@@ -52,7 +52,10 @@ roam stop   rbm21
   **confirm-gate** (`--confirm`) parks destructive shell commands (`rm`, `dd`, `mkfs`,
   `git push`, `DROP TABLE`, `shutdown`, pipe-to-shell, …) for async approval
   (`status: awaiting`, the exact command in `pending`) — `roam approve` runs it,
-  `roam deny` refuses it (the agent adapts), `roam stop` cancels; the append-only
+  `roam deny` refuses it (the agent adapts), `roam stop` cancels. A **deny budget**
+  (`--max-denials`, default 3) auto-halts a stubborn agent that keeps re-parking on
+  destructive variants (it tried `sudo rm` after a denied `rm` in live testing), so it
+  self-terminates instead of parking forever. The append-only
   **journal** records every model turn, tool call, result, and token cost; the mailbox
   is the **stop / steer / approve / deny** channel, applied at loop checkpoints.
 

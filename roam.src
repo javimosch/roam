@@ -118,7 +118,7 @@ func mailbox_put(db, cmd, arg) {
 
 // init_job creates a fresh job's DB + initial state. Same code path locally and on the
 // remote (called by _boot), so a job looks identical wherever it runs.
-func init_job(jobid, goal, every, host, kind, provider, model, maxiter, tokbudget, allow_shell, confirm, apibase, key) {
+func init_job(jobid, goal, every, host, kind, provider, model, maxiter, tokbudget, allow_shell, confirm, maxdenials, apibase, key) {
     db := open_db(db_path(jobid))
     ensure_schema(db)
     state_set(db, "status", "running")
@@ -134,6 +134,8 @@ func init_job(jobid, goal, every, host, kind, provider, model, maxiter, tokbudge
     state_set(db, "tokbudget", tokbudget)
     state_set(db, "allow_shell", allow_shell)
     state_set(db, "confirm", confirm)        // "1" -> destructive shell cmds park for approval
+    state_set(db, "maxdenials", maxdenials)  // deny budget: N denials -> auto-halt
+    state_set(db, "denials", "0")
     state_set(db, "pending", "")
     state_set(db, "api_base", apibase)
     state_set(db, "api_key", key)            // job-local secret (own VM); a hardening TODO
@@ -287,10 +289,30 @@ func wait_for_approval(db, cmd) (decision) {
         if decision == "" { sleep(1000) }
     }
     state_set(db, "pending", "")
-    if decision == "stop" { state_set(db, "status", "stopped")  journal(db, "confirm", "stopped by operator during approval wait") } else {
-        state_set(db, "status", "running")
-        journal(db, "confirm", decision + "d by operator")
+    if decision == "stop" {
+        state_set(db, "status", "stopped")
+        journal(db, "confirm", "stopped by operator during approval wait")
+        return decision
     }
+    if decision == "approve" {
+        state_set(db, "status", "running")
+        journal(db, "confirm", "approved by operator")
+        return decision
+    }
+    // deny — count it against the deny budget so a stubborn agent that keeps re-parking
+    // on destructive variants self-terminates instead of parking forever.
+    maxd := atoi(state_get(db, "maxdenials"))
+    if maxd < 1 { maxd = 3 }
+    denials := atoi(state_get(db, "denials")) + 1
+    state_set(db, "denials", str(denials))
+    if denials >= maxd {
+        state_set(db, "status", "halted")
+        journal(db, "confirm", "denied by operator; deny budget exhausted (" + str(denials) + "/" + str(maxd) + ") — halting")
+        decision = "halt"
+        return decision
+    }
+    state_set(db, "status", "running")
+    journal(db, "confirm", "denied by operator (" + str(denials) + "/" + str(maxd) + ")")
 }
 
 // build_tools_json is the Anthropic `tools` array. run_shell is present only
@@ -318,7 +340,8 @@ func exec_tool(db, name, argsjson, workdir, allow_shell) (result, iserr) {
         // confirm-gate: a destructive command parks for async operator approval.
         if state_get(db, "confirm") == "1" && is_destructive(cmd) == 1 {
             dec := wait_for_approval(db, cmd)
-            if dec == "deny" { journal(db, "tool", "run_shell DENIED: " + first_n(cmd, 200))  result = "The operator DENIED this command. Do not retry it — choose a different, non-destructive approach."  return result, iserr }
+            if dec == "deny" { journal(db, "tool", "run_shell DENIED: " + first_n(cmd, 200))  result = "The operator DENIED this command. Do not retry it or a variant — choose a different, non-destructive approach, or explain why you cannot proceed."  return result, iserr }
+            if dec == "halt" { result = "The operator denied this repeatedly; the deny budget is exhausted and the job is halting."  iserr = 1  return result, iserr }
             if dec == "stop" { result = "run cancelled: the job was stopped during approval"  iserr = 1  return result, iserr }
             // approved -> fall through and execute
         }
@@ -642,6 +665,7 @@ func cfg_shell(a) (v) { v = "0"  if has_flag(a, "--allow-shell") { v = "1" } }
 func cfg_kind(a) (v) { v = "agent"  if has_flag(a, "--tick") { v = "tick" } }
 func cfg_provider(a) (v) { v = flag(a, "--provider", "anthropic") }
 func cfg_confirm(a) (v) { v = "0"  if has_flag(a, "--confirm") { v = "1" } }
+func cfg_maxdenials(a) (v) { v = flag(a, "--max-denials", "3") }
 // get_key: the provider-neutral ROAM_API_KEY wins, else ANTHROPIC_API_KEY.
 func get_key() (k) { k = env("ROAM_API_KEY")  if k == "" { k = env("ANTHROPIC_API_KEY") } }
 
@@ -652,12 +676,12 @@ func cmd_send(a) {
     local := has_flag(a, "--local")
     model := cfg_model(a)  maxiter := cfg_maxiter(a)  tokbudget := cfg_tokens(a)
     apibase := cfg_apibase(a)  allow_shell := cfg_shell(a)  kind := cfg_kind(a)
-    provider := cfg_provider(a)  confirm := cfg_confirm(a)
+    provider := cfg_provider(a)  confirm := cfg_confirm(a)  maxdenials := cfg_maxdenials(a)
     key := get_key()
     jobid := to_hex(rand_bytes(4))   // decided by the controller, shipped to the remote
 
     if local {
-        init_job(jobid, goal, every, "local", kind, provider, model, maxiter, tokbudget, allow_shell, confirm, apibase, key)
+        init_job(jobid, goal, every, "local", kind, provider, model, maxiter, tokbudget, allow_shell, confirm, maxdenials, apibase, key)
         spawn_worker(jobid)
         write_last(jobid)
         println("{\"ok\":true,\"mode\":\"local\",\"kind\":" + jstr(kind) + ",\"jobid\":" + jstr(jobid) + "}")
@@ -675,7 +699,7 @@ func cmd_send(a) {
     // of the arg list). --goal MUST be last (flag_rest consumes the remainder as goal).
     cfgflags := " --provider " + provider + " --model " + model + " --max-iters " + maxiter + " --tokens " + tokbudget + " --api-base " + apibase
     if allow_shell == "1" { cfgflags = cfgflags + " --allow-shell" }
-    if confirm == "1" { cfgflags = cfgflags + " --confirm" }
+    if confirm == "1" { cfgflags = cfgflags + " --confirm --max-denials " + maxdenials }
     if kind == "tick" { cfgflags = cfgflags + " --tick" }
     bootcmd := "ssh " + to + " 'ROAM_API_KEY=" + key + " ~/.roam/roam _boot " + jobid + " " + every + cfgflags + " --goal " + goal + "' >/dev/null"
     // _boot inits the job DB + detaches the worker on the remote; its stdout is
@@ -695,7 +719,7 @@ func cmd_boot(a) {
     jobid := a[2]
     every := a[3]
     goal := flag_rest(a, "--goal")
-    init_job(jobid, goal, every, "self", cfg_kind(a), cfg_provider(a), cfg_model(a), cfg_maxiter(a), cfg_tokens(a), cfg_shell(a), cfg_confirm(a), cfg_apibase(a), get_key())
+    init_job(jobid, goal, every, "self", cfg_kind(a), cfg_provider(a), cfg_model(a), cfg_maxiter(a), cfg_tokens(a), cfg_shell(a), cfg_confirm(a), cfg_maxdenials(a), cfg_apibase(a), get_key())
     spawn_worker(jobid)
     println("{\"ok\":true,\"jobid\":" + jstr(jobid) + "}")
 }
@@ -713,6 +737,7 @@ func cmd_status(a) {
     tokens := state_get(db, "tokens")
     tick := state_get(db, "tick")
     pending := state_get(db, "pending")
+    denials := state_get(db, "denials")
     recent := sqlite_query(db, "SELECT id, ts, kind, msg FROM journal ORDER BY id DESC LIMIT 8")
     sqlite_close(db)
     if iters == "" { iters = "0" }
@@ -720,8 +745,9 @@ func cmd_status(a) {
     if tick == "" { tick = "0" }
     if started == "" { started = "0" }
     if kind == "" { kind = "tick" }
+    if denials == "" { denials = "0" }
     // `pending` is the destructive command awaiting approval (status == "awaiting").
-    println("{\"jobid\":" + jstr(jobid) + ",\"status\":" + jstr(status) + ",\"kind\":" + jstr(kind) + ",\"goal\":" + jstr(goal) + ",\"iters\":" + iters + ",\"tokens\":" + tokens + ",\"tick\":" + tick + ",\"started\":" + started + ",\"pending\":" + jstr(pending) + ",\"recent\":" + recent + "}")
+    println("{\"jobid\":" + jstr(jobid) + ",\"status\":" + jstr(status) + ",\"kind\":" + jstr(kind) + ",\"goal\":" + jstr(goal) + ",\"iters\":" + iters + ",\"tokens\":" + tokens + ",\"denials\":" + denials + ",\"tick\":" + tick + ",\"started\":" + started + ",\"pending\":" + jstr(pending) + ",\"recent\":" + recent + "}")
 }
 
 func cmd_attach(a) {
@@ -785,6 +811,7 @@ func usage() {
     write(2, "           --provider anthropic|openai  --api-base <url>\n")
     write(2, "           --max-iters <n>  --tokens <n>  --every <secs>\n")
     write(2, "    (--confirm parks destructive shell commands for approval;\n")
+    write(2, "     --max-denials <n> auto-halts after n denials [default 3];\n")
     write(2, "     agent mode reads the API key from ROAM_API_KEY or ANTHROPIC_API_KEY)\n")
     write(2, "  roam status  <host|jobid|last>\n")
     write(2, "  roam attach  <host|jobid|last>\n")
