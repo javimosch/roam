@@ -97,14 +97,46 @@ command is one-shot (stdout = JSON, stderr = text, semantic exit codes); there's
 prompt. The confirm-gate is therefore *async*: the worker parks and a supervisor
 approves out-of-band. A human types `roam approve rbm21`; a supervising agent reads
 `pending` from `roam status` JSON and calls `roam approve rbm21`. Identical surface.
-- **Providers:** `--provider anthropic` (default; Anthropic Messages API) or
-  `--provider openai` (any OpenAI-compatible endpoint — OpenRouter, etc. — via
-  `--api-base`). Both speak the same tools/sandbox/budget machinery; only the wire shape
-  differs. Key from `ROAM_API_KEY` or `ANTHROPIC_API_KEY`.
+- **Providers:** `--provider anthropic` (default; Anthropic Messages API), `--provider
+  openai` (any OpenAI-compatible endpoint — OpenRouter, etc. — via `--api-base`), or
+  `--provider debri` (delegate to the [`devin`](https://devin.ai) CLI via
+  [debri](https://github.com/javimosch/debri) — see below). The LLM providers speak the same
+  tools/sandbox/budget machinery; only the wire shape differs. Key from `ROAM_API_KEY` or
+  `ANTHROPIC_API_KEY`.
 - **Model:** default `claude-opus-4-8` (`--model` to override). Non-streaming,
   `max_tokens 16000`, transient `429`/`5xx` retried with backoff.
 - The assistant turn is replayed **verbatim** each iteration, so tool-use pairing stays
   correct across turns.
+
+**`--provider debri` — a subscription engine (no per-token cost).** Instead of roam's own
+LLM tool-loop, the worker hands the whole goal to the [`devin`](https://devin.ai) CLI (the
+SWE-1.x models) via [debri](https://github.com/javimosch/debri), streaming its JSONL into
+the journal. roam keeps everything around it — dispatch, self-replication, `attach`, `stop`
+— but the agent runs on a **flat Devin subscription**, so a long open-ended build costs the
+same whether it thinks for one minute or thirty. No API key, no `--tokens` budget; those
+flags are moot for this provider. Needs `devin` (authenticated) + `debri` on the target's
+`PATH`.
+
+```bash
+roam send --to my-vm --provider debri --model SWE-1.7 \
+  --goal "clone repo X, build the thing, run its tests, push a branch"
+roam attach my-vm     # tail devin's output over ssh
+roam stop   my-vm     # SIGTERMs debri so it tears down the devin session cleanly
+```
+
+- Flags: `--debri-perm auto|dangerous` (devin permission mode, default `dangerous`) and
+  `--debri-stable <ms>` (debri's silence safety-cap, default `300000`). A done-marker is
+  appended to the goal so a cooperative session ends promptly instead of waiting out the cap.
+- **Two things to know about `devin -p` (headless).** It is **silent** — work happens
+  server-side and lands on disk in bursts, so the **working directory is the truthful
+  progress signal**, not the streamed text (which can come back empty even on success). And
+  it completes a **bounded slice** of a big brief then exits — so hand it *focused* slices,
+  and give `--debri-stable` enough room to cover its silent cloud-provisioning startup
+  (~1–3 min) or debri will declare it done too early.
+- **Proven end-to-end:** built [machin-hill-climb](https://github.com/javimosch/machin-hill-climb)
+  — a Box2D + raylib physics game **and** a pure-MFL WebAssembly port
+  ([live](https://javimosch.github.io/machin-hill-climb/)) — dispatched through this engine
+  on SWE-1.7, verified compiling + playtested.
 
 **Live-proven on rbm21** (OpenRouter, `poolside/laguna-xs-2.1`, `--allow-shell`): a
 dispatched agent self-replicated, ran `uname`/`nproc`/`free`/`df` on the box, wrote a
