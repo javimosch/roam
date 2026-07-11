@@ -114,8 +114,18 @@ SWE-1.x models) via [debri](https://github.com/javimosch/debri), streaming its J
 the journal. roam keeps everything around it — dispatch, self-replication, `attach`, `stop`
 — but the agent runs on a **flat Devin subscription**, so a long open-ended build costs the
 same whether it thinks for one minute or thirty. No API key, no `--tokens` budget; those
-flags are moot for this provider. Needs `devin` (authenticated) + `debri` on the target's
-`PATH`.
+flags are moot for this provider.
+
+The target needs three things (no source, no build) — the **debri binary**, the
+**`devin`** CLI (authenticated), and **`tmux`**:
+
+```bash
+# debri: one prebuilt binary from its GitHub releases (no codebase needed)
+curl -fsSL https://github.com/javimosch/debri/releases/latest/download/debri \
+  -o ~/.local/bin/debri && chmod +x ~/.local/bin/debri
+devin auth login          # authenticate the devin CLI (a Devin subscription)
+# tmux from your package manager (debri drives devin inside a tmux session)
+```
 
 ```bash
 roam send --to my-vm --provider debri --model SWE-1.7 \

@@ -767,7 +767,7 @@ func agent_loop_debri(db, jobid) {
     journal(db, "system", "debri engine started (model=" + model + ", perm=" + perm + ", stable=" + stable + "ms, workdir=" + workdir + ")")
     cmd := "debri --model \"" + model + "\" --permission-mode " + perm + " --working-dir " + workdir + " --stable-timeout " + stable + " --done-marker " + DEBRI_DONE_MARKER + " --stream --file " + goalfile + " > " + streamfile + " 2>&1 &"
     if system(cmd) != 0 {
-        journal(db, "error", "failed to launch debri (is it on PATH? is devin authed?)")
+        journal(db, "error", "failed to launch debri — install the binary on the target: curl -fsSL https://github.com/javimosch/debri/releases/latest/download/debri -o ~/.local/bin/debri && chmod +x ~/.local/bin/debri ; then ensure `devin` is authenticated and `tmux` is present")
         state_set(db, "status", "error")  sqlite_close(db)  return
     }
 
