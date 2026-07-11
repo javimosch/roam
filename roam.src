@@ -146,6 +146,10 @@ func init_job(jobid, goal, every, host, a) {
     state_set(db, "api_base", cfg_apibase(a))
     state_set(db, "debri_perm", cfg_debri_perm(a))// --provider debri: devin permission-mode (auto|dangerous)
     state_set(db, "debri_stable", cfg_debri_stable(a))
+    state_set(db, "jobid", jobid)                 // so hub_sync/hub_poll can identify the job
+    state_set(db, "hub", cfg_hub(a))              // roam-panel hub URL ("" = disabled)
+    state_set(db, "hub_token", cfg_hub_token(a))  // worker bearer token
+    state_set(db, "hub_last_id", "0")             // high-water mark of journal rows sent to the hub
     state_set(db, "api_key", get_key())           // job-local secret (own VM); a hardening TODO
     journal(db, "system", "job created (kind=" + cfg_kind(a) + ", goal=" + goal + ")")
     sqlite_close(db)
@@ -301,6 +305,7 @@ func wait_for_approval(db, cmd) (decision) {
     state_set(db, "pending", cmd)
     state_set(db, "status", "awaiting")
     journal(db, "confirm", "AWAITING APPROVAL for destructive command: " + first_n(cmd, 400))
+    hub_sync(db)                            // report the park immediately -> hub emails you the one-tap links
     decision = ""
     for decision == "" {
         rows := sqlite_query(db, "SELECT id, cmd, arg FROM mailbox WHERE consumed = 0 ORDER BY id")
@@ -310,6 +315,12 @@ func wait_for_approval(db, cmd) (decision) {
             if m.cmd == "deny" { decision = "deny" }
             if m.cmd == "stop" { decision = "stop" }
             sqlite_exec(db, "UPDATE mailbox SET consumed = 1 WHERE id = ?", []string{str(m.id)})
+        }
+        if decision == "" {
+            hd := hub_poll(db)
+            if hd == "approve" { decision = "approve" }
+            if hd == "deny" { decision = "deny" }
+            if hd == "stop" { decision = "stop" }
         }
         if decision == "" { sleep(1000) }
     }
@@ -495,6 +506,10 @@ func agent_drain(db) (sig) {
         if m.cmd == "note" { journal(db, "steer", m.arg)  if sig != "stop" { sig = "note:" + m.arg } }
         sqlite_exec(db, "UPDATE mailbox SET consumed = 1 WHERE id = ?", []string{str(m.id)})
     }
+    hub_sync(db)                                    // mirror progress to the hub each iteration
+    hd := hub_poll(db)                              // and let the phone steer/stop from anywhere
+    if hd == "stop" { sig = "stop" }
+    if has_prefix(hd, "note:") { journal(db, "steer", substr(hd, 5, len(hd)))  if sig != "stop" { sig = hd } }
 }
 
 // http_post_retry POSTs one request, retrying transient 429/5xx a few times. Returns
@@ -522,6 +537,57 @@ func call_api(url, key, body) (status, resp) {
 var AGENT_SYSTEM = "You are roam, an autonomous agent running unattended on a remote machine. Work toward the user's goal using the provided tools. You are operating autonomously: the user is not watching in real time and cannot answer questions mid-task, so do not ask for confirmation — for reversible actions that follow from the goal, just proceed. All file paths are relative to your working directory. When the goal is complete, call the finish tool with a short summary. Keep any text between tool calls to one brief sentence."
 
 // agent_loop is the manual Anthropic tool-use loop with hard budgets.
+// ---- roam-panel hub integration (opt-in via --hub): report OUT + poll IN over HTTP ----
+// The worker mirrors its journal + status to a roam-panel hub and polls it for
+// approve/deny/steer/stop decisions, so you can drive the agent from a phone. Every
+// function is a no-op when "hub" is empty (the default), so non-hub jobs are unaffected.
+
+// hub_sync posts the current status + the journal delta (rows since hub_last_id). Advances
+// hub_last_id only on a 200, so a failed post re-sends the events next tick.
+func hub_sync(db) {
+    hub := state_get(db, "hub")
+    if hub == "" { return }
+    token := state_get(db, "hub_token")
+    lastid := state_get(db, "hub_last_id")
+    if lastid == "" { lastid = "0" }
+    evrows := sqlite_query(db, "SELECT id, ts, kind, msg FROM journal WHERE id > ? ORDER BY id", []string{lastid})
+    it := state_get(db, "iters")  if it == "" { it = "0" }
+    tk := state_get(db, "tokens")  if tk == "" { tk = "0" }
+    body := "{\"job\":" + jstr(state_get(db, "jobid")) + ",\"host\":" + jstr(state_get(db, "host")) + ",\"goal\":" + jstr(state_get(db, "goal")) + ",\"provider\":" + jstr(state_get(db, "provider")) + ",\"status\":" + jstr(state_get(db, "status")) + ",\"pending\":" + jstr(state_get(db, "pending")) + ",\"iters\":" + it + ",\"tokens\":" + tk + ",\"events\":" + evrows + "}"
+    hdrs := []string{"Authorization: Bearer " + token, "Content-Type: application/json"}
+    st, _ := http_post_retry(hub + "/v1/report", hdrs, body)
+    if st == 200 {
+        mx := sqlite_query(db, "SELECT COALESCE(MAX(id),0) AS m FROM journal")
+        m, _ := json_get(mx, "[0].m")
+        state_set(db, "hub_last_id", m)
+    }
+}
+// hub_poll asks the hub for a pending decision: "approve"/"deny"/"stop", "note:<text>", or "".
+func hub_poll(db) (decision) {
+    decision = ""
+    hub := state_get(db, "hub")
+    if hub == "" { return decision }
+    token := state_get(db, "hub_token")
+    hdrs := []string{"Authorization: Bearer " + token}
+    st, resp, _ := http_request("GET", hub + "/v1/decision?job=" + state_get(db, "jobid"), hdrs, "")
+    if st != 200 { return decision }
+    d, err := json_get(resp, ".decision")
+    if err != "" { return decision }
+    dv := junquote(d)
+    if dv == "note" {
+        a, _ := json_get(resp, ".arg")
+        decision = "note:" + junquote(a)
+    } else {
+        if dv != "" { decision = dv }
+    }
+}
+// worker_close reports the (often terminal) status one last time, then closes — used in
+// place of sqlite_close inside the agent loops so the hub sees done/halted/error/stopped.
+func worker_close(db) {
+    hub_sync(db)
+    sqlite_close(db)
+}
+
 func agent_loop(db, jobid) {
     key := state_get(db, "api_key")
     model := state_get(db, "model")
@@ -546,15 +612,15 @@ func agent_loop(db, jobid) {
     done := 0
     for done == 0 {
         sig := agent_drain(db)
-        if sig == "stop" { journal(db, "system", "stopped by user")  state_set(db, "status", "stopped")  sqlite_close(db)  return }
+        if sig == "stop" { journal(db, "system", "stopped by user")  state_set(db, "status", "stopped")  worker_close(db)  return }
         if has_prefix(sig, "note:") { msgs = msgs + ",{\"role\":\"user\",\"content\":" + jstr("[operator note] " + substr(sig, 5, len(sig))) + "}" }
 
-        if iters >= maxiter { journal(db, "budget", "iteration budget reached (" + str(maxiter) + ") — halting")  state_set(db, "status", "halted")  sqlite_close(db)  return }
-        if spent >= tokbudget { journal(db, "budget", "token budget reached (" + str(spent) + "/" + str(tokbudget) + ") — halting")  state_set(db, "status", "halted")  sqlite_close(db)  return }
+        if iters >= maxiter { journal(db, "budget", "iteration budget reached (" + str(maxiter) + ") — halting")  state_set(db, "status", "halted")  worker_close(db)  return }
+        if spent >= tokbudget { journal(db, "budget", "token budget reached (" + str(spent) + "/" + str(tokbudget) + ") — halting")  state_set(db, "status", "halted")  worker_close(db)  return }
 
         body := "{\"model\":" + jstr(model) + ",\"max_tokens\":16000,\"system\":" + jstr(AGENT_SYSTEM) + ",\"tools\":" + tools + ",\"messages\":[" + msgs + "]}"
         status, resp := call_api(url, key, body)
-        if status != 200 { journal(db, "error", "api status " + str(status) + ": " + first_n(resp, 400))  state_set(db, "status", "error")  sqlite_close(db)  return }
+        if status != 200 { journal(db, "error", "api status " + str(status) + ": " + first_n(resp, 400))  state_set(db, "status", "error")  worker_close(db)  return }
 
         spent = spent + atoi_json(resp, ".usage.input_tokens") + atoi_json(resp, ".usage.output_tokens")
         iters = iters + 1
@@ -601,23 +667,23 @@ func agent_loop(db, jobid) {
         }
         done = 0   // reset the inner-loop sentinel
 
-        if is_terminal(state_get(db, "status")) == 1 { sqlite_close(db)  return }   // stopped during an approval wait
-        if finished == 1 { journal(db, "system", "agent finished: " + finishmsg)  state_set(db, "status", "done")  sqlite_close(db)  return }
+        if is_terminal(state_get(db, "status")) == 1 { worker_close(db)  return }   // stopped during an approval wait
+        if finished == 1 { journal(db, "system", "agent finished: " + finishmsg)  state_set(db, "status", "done")  worker_close(db)  return }
 
         stop, _ := json_get(resp, ".stop_reason")
         if junquote(stop) != "tool_use" {
             journal(db, "system", "agent ended its turn (stop_reason=" + junquote(stop) + ")")
             state_set(db, "status", "done")
-            sqlite_close(db)
+            worker_close(db)
             return
         }
         if len(results) == 0 {
             journal(db, "error", "stop_reason=tool_use but no tool_result produced — halting")
-            state_set(db, "status", "error")  sqlite_close(db)  return
+            state_set(db, "status", "error")  worker_close(db)  return
         }
         msgs = msgs + ",{\"role\":\"user\",\"content\":[" + join(results, ",") + "]}"
     }
-    sqlite_close(db)
+    worker_close(db)
 }
 
 // ---- OpenAI-compatible provider (OpenRouter, etc.) ----------------------------
@@ -660,15 +726,15 @@ func agent_loop_openai(db, jobid) {
     done := 0
     for done == 0 {
         sig := agent_drain(db)
-        if sig == "stop" { journal(db, "system", "stopped by user")  state_set(db, "status", "stopped")  sqlite_close(db)  return }
+        if sig == "stop" { journal(db, "system", "stopped by user")  state_set(db, "status", "stopped")  worker_close(db)  return }
         if has_prefix(sig, "note:") { msgs = msgs + ",{\"role\":\"user\",\"content\":" + jstr("[operator note] " + substr(sig, 5, len(sig))) + "}" }
 
-        if iters >= maxiter { journal(db, "budget", "iteration budget reached (" + str(maxiter) + ") — halting")  state_set(db, "status", "halted")  sqlite_close(db)  return }
-        if spent >= tokbudget { journal(db, "budget", "token budget reached (" + str(spent) + "/" + str(tokbudget) + ") — halting")  state_set(db, "status", "halted")  sqlite_close(db)  return }
+        if iters >= maxiter { journal(db, "budget", "iteration budget reached (" + str(maxiter) + ") — halting")  state_set(db, "status", "halted")  worker_close(db)  return }
+        if spent >= tokbudget { journal(db, "budget", "token budget reached (" + str(spent) + "/" + str(tokbudget) + ") — halting")  state_set(db, "status", "halted")  worker_close(db)  return }
 
         body := "{\"model\":" + jstr(model) + ",\"max_tokens\":16000,\"messages\":[" + msgs + "],\"tools\":" + tools + ",\"tool_choice\":\"auto\"}"
         status, resp := http_post_retry(url, hdrs, body)
-        if status != 200 { journal(db, "error", "api status " + str(status) + ": " + first_n(resp, 400))  state_set(db, "status", "error")  sqlite_close(db)  return }
+        if status != 200 { journal(db, "error", "api status " + str(status) + ": " + first_n(resp, 400))  state_set(db, "status", "error")  worker_close(db)  return }
 
         spent = spent + atoi_json(resp, ".usage.prompt_tokens") + atoi_json(resp, ".usage.completion_tokens")
         iters = iters + 1
@@ -708,25 +774,25 @@ func agent_loop_openai(db, jobid) {
         }
         done = 0
 
-        if is_terminal(state_get(db, "status")) == 1 { sqlite_close(db)  return }   // stopped during an approval wait
+        if is_terminal(state_get(db, "status")) == 1 { worker_close(db)  return }   // stopped during an approval wait
 
         i := 0
         for i < len(toolmsgs) { msgs = msgs + "," + toolmsgs[i]  i = i + 1 }
 
-        if finished == 1 { journal(db, "system", "agent finished: " + finishmsg)  state_set(db, "status", "done")  sqlite_close(db)  return }
+        if finished == 1 { journal(db, "system", "agent finished: " + finishmsg)  state_set(db, "status", "done")  worker_close(db)  return }
         fr, _ := json_get(resp, ".choices[0].finish_reason")
         if junquote(fr) != "tool_calls" {
             journal(db, "system", "agent ended its turn (finish_reason=" + junquote(fr) + ")")
             state_set(db, "status", "done")
-            sqlite_close(db)
+            worker_close(db)
             return
         }
         if len(toolmsgs) == 0 {
             journal(db, "error", "finish_reason=tool_calls but no tool_calls parsed — halting")
-            state_set(db, "status", "error")  sqlite_close(db)  return
+            state_set(db, "status", "error")  worker_close(db)  return
         }
     }
-    sqlite_close(db)
+    worker_close(db)
 }
 
 // ---- debri / Devin (SWE-1.x) provider -----------------------------------------
@@ -768,7 +834,7 @@ func agent_loop_debri(db, jobid) {
     cmd := "debri --model \"" + model + "\" --permission-mode " + perm + " --working-dir " + workdir + " --stable-timeout " + stable + " --done-marker " + DEBRI_DONE_MARKER + " --stream --file " + goalfile + " > " + streamfile + " 2>&1 &"
     if system(cmd) != 0 {
         journal(db, "error", "failed to launch debri — install the binary on the target: curl -fsSL https://github.com/javimosch/debri/releases/latest/download/debri -o ~/.local/bin/debri && chmod +x ~/.local/bin/debri ; then ensure `devin` is authenticated and `tmux` is present")
-        state_set(db, "status", "error")  sqlite_close(db)  return
+        state_set(db, "status", "error")  worker_close(db)  return
     }
 
     // Tail the stream file, journaling each COMPLETE (newline-terminated) JSONL line once.
@@ -781,7 +847,7 @@ func agent_loop_debri(db, jobid) {
         if sig == "stop" {
             system("pkill -TERM -f 'debri --model'")
             journal(db, "system", "stopped by user (SIGTERM -> debri tears down devin session)")
-            state_set(db, "status", "stopped")  sqlite_close(db)  return
+            state_set(db, "status", "stopped")  worker_close(db)  return
         }
         // (a steering note can't be injected into a running devin session; agent_drain
         //  still journals it as `steer` for the record.)
@@ -819,7 +885,7 @@ func agent_loop_debri(db, jobid) {
         lastn = nc
         if done == 0 { sleep(3000) }
     }
-    sqlite_close(db)
+    worker_close(db)
 }
 
 func cmd_work(a) {
@@ -879,6 +945,8 @@ func cfg_debri_perm(a) (v) { v = flag(a, "--debri-perm", "dangerous") }  // --pr
 // (5000) makes it bail before devin even starts. 300000 = 5min safety cap; the done-marker
 // (below) is what ends a cooperative session promptly.
 func cfg_debri_stable(a) (v) { v = flag(a, "--debri-stable", "300000") }
+func cfg_hub(a) (v) { v = flag(a, "--hub", "") }                              // roam-panel hub URL (opt-in)
+func cfg_hub_token(a) (v) { v = flag(a, "--hub-token", env("ROAM_HUB_TOKEN")) }  // worker bearer; env by default
 // get_key: the provider-neutral ROAM_API_KEY wins, else ANTHROPIC_API_KEY.
 func get_key() (k) { k = env("ROAM_API_KEY")  if k == "" { k = env("ANTHROPIC_API_KEY") } }
 
@@ -891,6 +959,7 @@ func cmd_send(a) {
     apibase := cfg_apibase(a)  allow_shell := cfg_shell(a)  kind := cfg_kind(a)
     provider := cfg_provider(a)  confirm := cfg_confirm(a)  maxdenials := cfg_maxdenials(a)
     verify := cfg_verify(a)  maxverify := cfg_maxverify(a)
+    hub := cfg_hub(a)  hubtoken := cfg_hub_token(a)
     key := get_key()
     jobid := to_hex(rand_bytes(4))   // decided by the controller, shipped to the remote
 
@@ -916,10 +985,11 @@ func cmd_send(a) {
     if confirm == "1" { cfgflags = cfgflags + " --confirm --max-denials " + maxdenials }
     if verify == "1" { cfgflags = cfgflags + " --verify --max-verify " + maxverify }
     if provider == "debri" { cfgflags = cfgflags + " --debri-perm " + cfg_debri_perm(a) + " --debri-stable " + cfg_debri_stable(a) }
+    if hub != "" { cfgflags = cfgflags + " --hub " + hub }
     if kind == "tick" { cfgflags = cfgflags + " --tick" }
     // the goal is base64'd so quotes/parens/any shell-special char survive the ssh
     // single-quote wrapper (a raw --goal with a ' in it breaks the remote command).
-    bootcmd := "ssh " + to + " 'ROAM_API_KEY=" + key + " ~/.roam/roam _boot " + jobid + " " + every + cfgflags + " --goal-b64 " + base64_encode(goal) + "' >/dev/null"
+    bootcmd := "ssh " + to + " 'ROAM_API_KEY=" + key + " ROAM_HUB_TOKEN=" + hubtoken + " ~/.roam/roam _boot " + jobid + " " + every + cfgflags + " --goal-b64 " + base64_encode(goal) + "' >/dev/null"
     // _boot inits the job DB + detaches the worker on the remote; its stdout is
     // suppressed so the controller emits exactly one JSON answer.
     if system(bootcmd) != 0 { write(2, "{\"ok\":false,\"error\":\"remote boot failed\"}\n")  exit(100) }
