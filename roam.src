@@ -144,6 +144,8 @@ func init_job(jobid, goal, every, host, a) {
     state_set(db, "vfails", "0")
     state_set(db, "pending", "")
     state_set(db, "api_base", cfg_apibase(a))
+    state_set(db, "debri_perm", cfg_debri_perm(a))// --provider debri: devin permission-mode (auto|dangerous)
+    state_set(db, "debri_stable", cfg_debri_stable(a))
     state_set(db, "api_key", get_key())           // job-local secret (own VM); a hardening TODO
     journal(db, "system", "job created (kind=" + cfg_kind(a) + ", goal=" + goal + ")")
     sqlite_close(db)
@@ -727,6 +729,99 @@ func agent_loop_openai(db, jobid) {
     sqlite_close(db)
 }
 
+// ---- debri / Devin (SWE-1.x) provider -----------------------------------------
+// A different KIND of engine: instead of running roam's own tool-loop, hand the whole
+// goal to the `devin` CLI via `debri`. Devin runs its own agentic loop under a flat
+// subscription — no per-token cost, which is the point. roam keeps everything around
+// it: dispatch, self-replication, the journal, and stop. We spawn debri detached in the
+// background streaming JSONL to a file, tail that file into the journal so `attach` is
+// live, and honor the mailbox stop by SIGTERM'ing debri (its signal handler tears down
+// the devin/tmux session cleanly). No LLM key, no token budget — those flags are moot.
+//
+// debri JSONL events (one JSON object per line): {"event":"init","status":"ok"} ·
+// {"event":"chunk","content":"..."} · {"event":"done","content":"...","elapsed_ms":N} ·
+// {"event":"error","error":"...","elapsed_ms":N}.
+var DEBRI_DONE_MARKER = "ROAM_SESSION_COMPLETE_7f3a"
+
+func agent_loop_debri(db, jobid) {
+    model := state_get(db, "model")
+    if has_prefix(model, "claude") { model = "SWE-1.7" }   // default when --model wasn't given
+    perm := state_get(db, "debri_perm")
+    if perm == "" { perm = "dangerous" }
+    stable := state_get(db, "debri_stable")
+    if stable == "" { stable = "300000" }
+    goal := state_get(db, "goal")
+    workdir := roam_home() + "/work/" + jobid
+    mkdir_p2(roam_home() + "/work", workdir)
+
+    // Ship the goal via a file (debri --file) so no shell-escaping of the prompt is needed.
+    // Append a done-marker instruction: debri ends the session the moment devin prints the
+    // marker line, so a cooperative session finishes promptly instead of waiting out the
+    // (necessarily long) silence safety cap.
+    goalfile := roam_home() + "/" + jobid + ".goal"
+    marked := goal + "\n\n---\nIMPORTANT: When you have COMPLETELY finished the task (all work done, and any repo created/committed/pushed), print this EXACT line by itself as your final output, with nothing after it:\n" + DEBRI_DONE_MARKER + "\n"
+    write_file(goalfile, marked)
+    streamfile := roam_home() + "/" + jobid + ".debri.jsonl"
+    write_file(streamfile, "")
+
+    journal(db, "system", "debri engine started (model=" + model + ", perm=" + perm + ", stable=" + stable + "ms, workdir=" + workdir + ")")
+    cmd := "debri --model \"" + model + "\" --permission-mode " + perm + " --working-dir " + workdir + " --stable-timeout " + stable + " --done-marker " + DEBRI_DONE_MARKER + " --stream --file " + goalfile + " > " + streamfile + " 2>&1 &"
+    if system(cmd) != 0 {
+        journal(db, "error", "failed to launch debri (is it on PATH? is devin authed?)")
+        state_set(db, "status", "error")  sqlite_close(db)  return
+    }
+
+    // Tail the stream file, journaling each COMPLETE (newline-terminated) JSONL line once.
+    // split(content,"\n") yields (#newlines)+1 elems; the last is the partial/empty tail,
+    // so #complete lines = len(parts)-1 — robust against reading a half-written last line.
+    lastn := 0
+    done := 0
+    for done == 0 {
+        sig := agent_drain(db)
+        if sig == "stop" {
+            system("pkill -TERM -f 'debri --model'")
+            journal(db, "system", "stopped by user (SIGTERM -> debri tears down devin session)")
+            state_set(db, "status", "stopped")  sqlite_close(db)  return
+        }
+        // (a steering note can't be injected into a running devin session; agent_drain
+        //  still journals it as `steer` for the record.)
+        content := read_file(streamfile)
+        parts := split(content, "\n")
+        nc := len(parts) - 1
+        if nc < 0 { nc = 0 }
+        i := lastn
+        for i < nc {
+            line := trim(parts[i])
+            if line != "" {
+                ev, _ := json_get(line, ".event")
+                e := junquote(ev)
+                if e == "init" { journal(db, "devin", "session started") }
+                if e == "chunk" {
+                    c, _ := json_get(line, ".content")
+                    tx := junquote(c)
+                    if trim(tx) != "" { journal(db, "devin", tx) }
+                }
+                if e == "done" {
+                    c, _ := json_get(line, ".content")
+                    fin := junquote(c)
+                    if trim(fin) != "" { journal(db, "devin", fin) }
+                    journal(db, "system", "debri finished (devin session complete)")
+                    state_set(db, "status", "done")  done = 1
+                }
+                if e == "error" {
+                    er, _ := json_get(line, ".error")
+                    journal(db, "error", "debri: " + junquote(er))
+                    state_set(db, "status", "error")  done = 1
+                }
+            }
+            i = i + 1
+        }
+        lastn = nc
+        if done == 0 { sleep(3000) }
+    }
+    sqlite_close(db)
+}
+
 func cmd_work(a) {
     if len(a) < 3 { write(2, "roam _work: needs <jobid>\n")  exit(64) }
     jobid := a[2]
@@ -735,6 +830,7 @@ func cmd_work(a) {
     journal(db, "system", "worker started")
     state_set(db, "status", "running")
     if state_get(db, "kind") == "agent" {
+        if state_get(db, "provider") == "debri" { agent_loop_debri(db, jobid)  return }
         if state_get(db, "provider") == "openai" { agent_loop_openai(db, jobid)  return }
         agent_loop(db, jobid)
         return
@@ -777,6 +873,12 @@ func cfg_confirm(a) (v) { v = "0"  if has_flag(a, "--confirm") { v = "1" } }
 func cfg_maxdenials(a) (v) { v = flag(a, "--max-denials", "3") }
 func cfg_verify(a) (v) { v = "0"  if has_flag(a, "--verify") { v = "1" } }
 func cfg_maxverify(a) (v) { v = flag(a, "--max-verify", "2") }
+func cfg_debri_perm(a) (v) { v = flag(a, "--debri-perm", "dangerous") }  // --provider debri: devin permission-mode
+// debri declares the session done after this many ms of pane silence. devin can be silent
+// for a while (cloud provisioning ~60-90s, long thinks, silent compiles), so the default
+// (5000) makes it bail before devin even starts. 300000 = 5min safety cap; the done-marker
+// (below) is what ends a cooperative session promptly.
+func cfg_debri_stable(a) (v) { v = flag(a, "--debri-stable", "300000") }
 // get_key: the provider-neutral ROAM_API_KEY wins, else ANTHROPIC_API_KEY.
 func get_key() (k) { k = env("ROAM_API_KEY")  if k == "" { k = env("ANTHROPIC_API_KEY") } }
 
@@ -801,7 +903,7 @@ func cmd_send(a) {
     }
 
     if to == "" { write(2, "{\"ok\":false,\"error\":\"--to <host> required (or --local)\"}\n")  exit(64) }
-    if kind == "agent" && key == "" { write(2, "{\"ok\":false,\"error\":\"ANTHROPIC_API_KEY not set (agent mode); export it or use --tick\"}\n")  exit(64) }
+    if kind == "agent" && provider != "debri" && key == "" { write(2, "{\"ok\":false,\"error\":\"ANTHROPIC_API_KEY not set (agent mode); export it, or use --tick / --provider debri\"}\n")  exit(64) }
     // self-replicate: ship this exact binary to the remote, then boot the job there.
     self := args()[0]
     if system("ssh " + to + " 'mkdir -p ~/.roam'") != 0 { write(2, "{\"ok\":false,\"error\":\"ssh " + to + " failed\"}\n")  exit(100) }
@@ -813,6 +915,7 @@ func cmd_send(a) {
     if allow_shell == "1" { cfgflags = cfgflags + " --allow-shell" }
     if confirm == "1" { cfgflags = cfgflags + " --confirm --max-denials " + maxdenials }
     if verify == "1" { cfgflags = cfgflags + " --verify --max-verify " + maxverify }
+    if provider == "debri" { cfgflags = cfgflags + " --debri-perm " + cfg_debri_perm(a) + " --debri-stable " + cfg_debri_stable(a) }
     if kind == "tick" { cfgflags = cfgflags + " --tick" }
     // the goal is base64'd so quotes/parens/any shell-special char survive the ssh
     // single-quote wrapper (a raw --goal with a ' in it breaks the remote command).
@@ -927,9 +1030,13 @@ func usage() {
     write(2, "usage:\n")
     write(2, "  roam send --to <host> [flags] --goal <text>   # dispatch an agent (--goal LAST)\n")
     write(2, "    flags: --local  --allow-shell  --confirm  --tick  --model <id>\n")
-    write(2, "           --provider anthropic|openai  --api-base <url>\n")
+    write(2, "           --provider anthropic|openai|debri  --api-base <url>\n")
     write(2, "           --max-iters <n>  --tokens <n>  --every <secs>\n")
-    write(2, "    (--confirm parks destructive shell commands for approval;\n")
+    write(2, "    (--provider debri delegates the goal to the devin CLI (SWE-1.x) via\n")
+    write(2, "       debri — subscription, no token cost; --model <SWE-1.7|...>,\n")
+    write(2, "       --debri-perm auto|dangerous [default dangerous]; needs devin authed\n")
+    write(2, "       + debri on PATH on the target; no API key required;\n")
+    write(2, "     --confirm parks destructive shell commands for approval;\n")
     write(2, "     --max-denials <n> auto-halts after n denials [default 3];\n")
     write(2, "     --verify checks the goal (independent judge) before accepting finish,\n")
     write(2, "       --max-verify <n> halts after n failed verifies [default 2];\n")
