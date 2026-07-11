@@ -137,12 +137,18 @@ roam stop   my-vm     # SIGTERMs debri so it tears down the devin session cleanl
 - Flags: `--debri-perm auto|dangerous` (devin permission mode, default `dangerous`) and
   `--debri-stable <ms>` (debri's silence safety-cap, default `300000`). A done-marker is
   appended to the goal so a cooperative session ends promptly instead of waiting out the cap.
-- **Two things to know about `devin -p` (headless).** It is **silent** — work happens
-  server-side and lands on disk in bursts, so the **working directory is the truthful
-  progress signal**, not the streamed text (which can come back empty even on success). And
-  it completes a **bounded slice** of a big brief then exits — so hand it *focused* slices,
-  and give `--debri-stable` enough room to cover its silent cloud-provisioning startup
-  (~1–3 min) or debri will declare it done too early.
+- **Use [debri](https://github.com/javimosch/debri) ≥ v1.2.0.** `devin -p` (print mode)
+  buffers its whole response and shows no incremental pane output during long operations,
+  which used to trip two things: debri would kill a quiet-but-working session at the
+  stable-timeout, and the captured content came back empty. **debri v1.2.0 fixes both** —
+  it treats process-exit (the pane returning to a shell) as the completion signal rather
+  than silence, and reads devin's redirected stdout for the response. So with v1.2.0+,
+  `--debri-stable` is just a backstop for a genuinely wedged pane, not a knob you have to
+  tune to survive devin's silent startup, and the journal gets devin's real final output.
+- **Still true regardless of version:** devin `-p` streams no *incremental* progress (its
+  output lands at completion), so for live mid-task insight the **working directory is the
+  truthful signal**; and each run completes a **bounded slice** of a big brief then exits —
+  so hand it *focused* slices rather than one giant goal.
 - **Proven end-to-end:** built [machin-hill-climb](https://github.com/javimosch/machin-hill-climb)
   — a Box2D + raylib physics game **and** a pure-MFL WebAssembly port
   ([live](https://javimosch.github.io/machin-hill-climb/)) — dispatched through this engine
