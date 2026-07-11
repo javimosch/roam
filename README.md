@@ -97,6 +97,23 @@ command is one-shot (stdout = JSON, stderr = text, semantic exit codes); there's
 prompt. The confirm-gate is therefore *async*: the worker parks and a supervisor
 approves out-of-band. A human types `roam approve rbm21`; a supervising agent reads
 `pending` from `roam status` JSON and calls `roam approve rbm21`. Identical surface.
+
+**Approve from your phone (`--hub`).** Point a job at a
+[roam-panel](https://github.com/javimosch/roam-panel) hub and the worker mirrors its
+journal + status there and polls it for decisions — so you get an email the moment it
+parks and can **approve / deny / steer / stop from a mobile web page**, no ssh:
+
+```
+roam send --to rbm21 --provider anthropic --confirm \
+  --hub https://panel.roam.intrane.fr --hub-token "$ROAM_HUB_TOKEN" \
+  --goal "clone repo X, run its tests, then git push a branch"
+```
+
+The URL rides as `--hub`; the token rides as the `ROAM_HUB_TOKEN` env var (kept out of the
+arg list, like the API key). It is fully opt-in — with no `--hub`, nothing is reported.
+Reporting works for every engine; per-command approve/deny is for the LLM engines
+(`--confirm`), since `debri` jobs can't park (devin owns permissions) — the hub shows their
+status and can `stop` them.
 - **Providers:** `--provider anthropic` (default; Anthropic Messages API), `--provider
   openai` (any OpenAI-compatible endpoint — OpenRouter, etc. — via `--api-base`), or
   `--provider debri` (delegate to the [`devin`](https://devin.ai) CLI via

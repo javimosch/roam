@@ -6,6 +6,14 @@ A browsable version with product + technical views lives under [`docs/`](docs/ch
 ## [Unreleased]
 
 ### Added
+- **`--hub` — approve from your phone.** Point a job at a
+  [roam-panel](https://github.com/javimosch/roam-panel) hub (`--hub <url> --hub-token`, or
+  the `ROAM_HUB_TOKEN` env var) and the worker mirrors its journal + status to the hub and
+  polls it for approve/deny/steer/stop decisions — so a parked destructive command can be
+  approved from a mobile web page (or a one-tap email link), no ssh. Fully opt-in (no `--hub`
+  = nothing reported); the token rides as an env var, not an arg. Reporting works for all
+  engines; per-command approve/deny is for the anthropic/openai engines (`debri` can't park).
+  Implemented as `hub_sync`/`hub_poll`/`worker_close` reusing the existing `http_post_retry`.
 - **`--provider debri` — a subscription engine (no per-token cost).** A third engine
   alongside `anthropic`/`openai`: instead of roam's own LLM tool-loop, the worker delegates
   the whole goal to the [`devin`](https://devin.ai) CLI (SWE-1.x) via
