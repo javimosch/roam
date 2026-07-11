@@ -6,6 +6,13 @@ A browsable version with product + technical views lives under [`docs/`](docs/ch
 ## [Unreleased]
 
 ### Added
+- **Session-level approval for `--provider debri`** (closes #5). devin owns its per-command
+  permissions in `-p` mode, so the confirm-gate can't intercept individual debri commands.
+  With `--confirm`, a debri job now **parks before starting the devin session** (`awaiting`,
+  `pending = "START a <model> session …"`) and waits for approve/deny via the mailbox / hub —
+  approve from the panel or a one-tap email. A denied/stopped session never spawns devin.
+  Reuses `wait_for_approval`; no new machinery. So `--confirm` = per-command approval on the
+  LLM engines, whole-session approval on debri.
 - **`--hub` — approve from your phone.** Point a job at a
   [roam-panel](https://github.com/javimosch/roam-panel) hub (`--hub <url> --hub-token`, or
   the `ROAM_HUB_TOKEN` env var) and the worker mirrors its journal + status to the hub and

@@ -820,6 +820,20 @@ func agent_loop_debri(db, jobid) {
     workdir := roam_home() + "/work/" + jobid
     mkdir_p2(roam_home() + "/work", workdir)
 
+    // Session-level approval (#5): debri can't gate individual commands — devin owns its
+    // permissions in -p mode — so `--confirm` gates the WHOLE run. Park before starting the
+    // devin session and let the operator approve/deny it (from the phone, via --hub); reuses
+    // the same wait_for_approval mailbox/hub path as the per-command LLM gate.
+    if state_get(db, "confirm") == "1" {
+        desc := "START a " + model + " session (debri/devin, permission-mode " + perm + ") for goal:\n" + first_n(goal, 400)
+        dec := wait_for_approval(db, desc)
+        if dec != "approve" {
+            journal(db, "system", "debri session not started (operator " + dec + ")")
+            state_set(db, "status", "stopped")  worker_close(db)  return
+        }
+        journal(db, "confirm", "debri session approved by operator — starting")
+    }
+
     // Ship the goal via a file (debri --file) so no shell-escaping of the prompt is needed.
     // Append a done-marker instruction: debri ends the session the moment devin prints the
     // marker line, so a cooperative session finishes promptly instead of waiting out the

@@ -111,9 +111,12 @@ roam send --to rbm21 --provider anthropic --confirm \
 
 The URL rides as `--hub`; the token rides as the `ROAM_HUB_TOKEN` env var (kept out of the
 arg list, like the API key). It is fully opt-in — with no `--hub`, nothing is reported.
-Reporting works for every engine; per-command approve/deny is for the LLM engines
-(`--confirm`), since `debri` jobs can't park (devin owns permissions) — the hub shows their
-status and can `stop` them.
+Reporting works for every engine. `--confirm` gives you **per-command** approve/deny on the
+LLM engines (anthropic/openai). For `debri` it gives you **session-level** approval: since
+devin owns its own per-command permissions in `-p` mode, `--confirm` instead parks the job
+*before starting the devin session* and asks you to approve/deny the whole run (the hub
+shows `START a <model> session …` with Approve/Deny). Either way the hub can also `stop` a
+running agent.
 - **Providers:** `--provider anthropic` (default; Anthropic Messages API), `--provider
   openai` (any OpenAI-compatible endpoint — OpenRouter, etc. — via `--api-base`), or
   `--provider debri` (delegate to the [`devin`](https://devin.ai) CLI via
@@ -154,6 +157,10 @@ roam stop   my-vm     # SIGTERMs debri so it tears down the devin session cleanl
 - Flags: `--debri-perm auto|dangerous` (devin permission mode, default `dangerous`) and
   `--debri-stable <ms>` (debri's silence safety-cap, default `300000`). A done-marker is
   appended to the goal so a cooperative session ends promptly instead of waiting out the cap.
+- **Session-level approval:** add `--confirm` (with `--hub`) to require sign-off *before the
+  devin session starts* — the job parks (`awaiting`, `START a <model> session …`) and you
+  approve/deny it from the panel or a one-tap email. devin can't be gated per-command in
+  `-p` mode, so this gates the whole run; a denied session never spawns devin.
 - **Use [debri](https://github.com/javimosch/debri) ≥ v1.2.0.** `devin -p` (print mode)
   buffers its whole response and shows no incremental pane output during long operations,
   which used to trip two things: debri would kill a quiet-but-working session at the
