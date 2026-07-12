@@ -98,14 +98,16 @@ prompt. The confirm-gate is therefore *async*: the worker parks and a supervisor
 approves out-of-band. A human types `roam approve rbm21`; a supervising agent reads
 `pending` from `roam status` JSON and calls `roam approve rbm21`. Identical surface.
 
-**Approve from your phone (`--hub`).** Point a job at a
-[roam-panel](https://github.com/javimosch/roam-panel) hub and the worker mirrors its
-journal + status there and polls it for decisions — so you get an email the moment it
-parks and can **approve / deny / steer / stop from a mobile web page**, no ssh:
+**Approve from your phone (`--hub`).** [**roam-panel**](https://github.com/javimosch/roam-panel)
+is a companion repo — a self-hostable control-plane hub (one machin binary: HTTP + SQLite +
+a mobile web dashboard, multi-tenant, magic-link login, email/Telegram notifications). Point
+a job at your hub and the worker mirrors its journal + status there and polls it for
+decisions — so you get an email the moment it parks and can **approve / deny / steer / stop
+from a mobile web page**, no ssh:
 
 ```
 roam send --to rbm21 --provider anthropic --confirm \
-  --hub https://panel.roam.intrane.fr --hub-token "$ROAM_HUB_TOKEN" \
+  --hub https://your-roam-panel --hub-token "$ROAM_HUB_TOKEN" \
   --goal "clone repo X, run its tests, then git push a branch"
 ```
 
