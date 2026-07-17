@@ -364,6 +364,7 @@ func judge_call(db, sys, usr) (txt) {
     if state_get(db, "provider") == "openai" {
         body := "{\"model\":" + jstr(model) + ",\"max_tokens\":500,\"messages\":[{\"role\":\"system\",\"content\":" + jstr(sys) + "},{\"role\":\"user\",\"content\":" + jstr(usr) + "}]}"
         hdrs := []string{"Authorization: Bearer " + key, "content-type: application/json"}
+        if maa_hdr(db) != "" { hdrs = append(hdrs, maa_hdr(db)) }
         st, resp := http_post_retry(apibase + "/chat/completions", hdrs, body)
         if st != 200 { return txt }
         c, _ := json_get(resp, ".choices[0].message.content")
@@ -728,6 +729,7 @@ func agent_loop_openai(db, jobid) {
     url := apibase + "/chat/completions"
     tools := build_tools_openai(allow_shell)
     hdrs := []string{"Authorization: Bearer " + key, "content-type: application/json"}
+    if maa_hdr(db) != "" { hdrs = append(hdrs, maa_hdr(db)) }
 
     journal(db, "system", "agent loop started [openai] (model=" + model + ", maxiter=" + str(maxiter) + ", tokens<=" + str(tokbudget) + ", shell=" + str(allow_shell) + ")")
     msgs := "{\"role\":\"system\",\"content\":" + jstr(AGENT_SYSTEM) + "},{\"role\":\"user\",\"content\":" + jstr(goal) + "}"
@@ -1142,7 +1144,7 @@ func maa_init_job(jobid, goal, model, hub, token, run_id, a) {
     state_set(db, "iters", "0")
     state_set(db, "tokens", "0")
     state_set(db, "kind", "agent")
-    state_set(db, "provider", "anthropic")
+    state_set(db, "provider", cfg_provider(a))
     state_set(db, "model", model)
     state_set(db, "maxiter", cfg_maxiter(a))
     state_set(db, "tokbudget", cfg_tokens(a))
@@ -1219,7 +1221,7 @@ func cmd_maa_worker(a) {
                     write(2, "roam worker: run " + run_id + " -> job " + jobid + "\n")
                     maa_init_job(jobid, goal, model, hub, token, run_id, a)
                     db := open_db(db_path(jobid))
-                    agent_loop(db, jobid)
+                    if cfg_provider(a) == "openai" { agent_loop_openai(db, jobid) } else { agent_loop(db, jobid) }
                     maa_report(hub, token, run_id, jobid)
                     write(2, "roam worker: run " + run_id + " reported\n")
                     if once { done = 1 }
