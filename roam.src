@@ -1008,6 +1008,8 @@ func cfg_debri_perm(a) (v) { v = flag(a, "--debri-perm", "dangerous") }  // --pr
 // (below) is what ends a cooperative session promptly.
 func cfg_debri_stable(a) (v) { v = flag(a, "--debri-stable", "300000") }
 func cfg_hub(a) (v) { v = flag(a, "--hub", "") }                              // roam-panel hub URL (opt-in)
+func cfg_panel(a) (v) { v = flag(a, "--panel", env("ROAM_PANEL_URL")) }       // worker mode: roam-panel URL (--hub is the maa hub there)
+func cfg_panel_token(a) (v) { v = flag(a, "--panel-token", env("ROAM_HUB_TOKEN")) }
 func cfg_hub_token(a) (v) { v = flag(a, "--hub-token", env("ROAM_HUB_TOKEN")) }  // worker bearer; env by default
 // get_key: the provider-neutral ROAM_API_KEY wins, else ANTHROPIC_API_KEY.
 func get_key() (k) { k = env("ROAM_API_KEY")  if k == "" { k = env("ANTHROPIC_API_KEY") } }
@@ -1196,8 +1198,10 @@ func maa_init_job(jobid, goal, model, hub, token, run_id, a) {
     state_set(db, "debri_perm", "dangerous")
     state_set(db, "debri_stable", "300000")
     state_set(db, "jobid", jobid)
-    state_set(db, "hub", "")
-    state_set(db, "hub_token", "")
+    // --panel wires hosted runs into roam-panel (live view + park emails +
+    // one-tap approve/deny). Distinct from --hub, which is the maa hub here.
+    state_set(db, "hub", cfg_panel(a))
+    state_set(db, "hub_token", cfg_panel_token(a))
     state_set(db, "hub_last_id", "0")
     state_set(db, "api_key", token)
     state_set(db, "maa_run", run_id)
@@ -1288,7 +1292,7 @@ func usage() {
     write(2, "       --max-verify <n> halts after n failed verifies [default 2];\n")
     write(2, "     agent mode reads the API key from ROAM_API_KEY or ANTHROPIC_API_KEY)\n")
     write(2, "  roam worker --hub <url> --token <maw_...>   # machin-agents hosted-run worker\n")
-    write(2, "    flags: --poll-secs <n> [20]  --once  --allow-shell  --verify\n")
+    write(2, "    flags: --poll-secs <n> [20]  --once  --allow-shell  --confirm  --verify\n           --panel <roam-panel-url> --panel-token <t>   # park emails + one-tap approve\n")
     write(2, "    (pull-based: polls the hub for due runs, executes with this engine,\n")
     write(2, "     model calls go through the hub's metered proxy — no local API key)\n")
     write(2, "  roam status  <host|jobid|last>\n")
