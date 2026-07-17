@@ -301,11 +301,41 @@ func is_destructive(cmd) (b) {
 // mailbox) until an operator approves/denies — or stops the job. This is the async
 // human-in-the-loop gate: roam is non-interactive, so approval is a mailbox message
 // (`roam approve|deny`), usable identically by a human or a supervising agent.
+// maa_park_notify / maa_poll — the machin-agents leg of the confirm-gate.
+// A hosted run has NOBODY at a terminal: the park is reported to the maa hub
+// (needs_human) and the decision comes back via the hub's decision endpoint
+// (maa approve/deny by the owning agent). Both are no-ops for normal jobs.
+func maa_park_notify(db, cmd) {
+    mr := state_get(db, "maa_run")
+    if mr == "" { return }
+    hub := state_get(db, "api_base")
+    tok := state_get(db, "api_key")
+    hdrs := []string{"content-type: application/json", "authorization: Bearer " + tok}
+    body := "{\"run_id\":" + jstr(mr) + ",\"command\":" + jstr(first_n(cmd, 400)) + "}"
+    s, b, e := http_request("POST", hub + "/v1/run/needs-human", hdrs, body)
+    if e != "" || s != 200 { journal(db, "confirm", "maa park notify failed: " + str(s) + " " + e + " " + first_n(b, 120)) }
+}
+
+func maa_poll(db) (d) {
+    d = ""
+    mr := state_get(db, "maa_run")
+    if mr == "" { return d }
+    hub := state_get(db, "api_base")
+    tok := state_get(db, "api_key")
+    hdrs := []string{"authorization: Bearer " + tok}
+    st, resp, herr := http_request("GET", hub + "/v1/run/decision?run=" + mr, hdrs, "")
+    if herr != "" || st != 200 { return d }
+    v, _ := json_get(resp, ".decision")
+    d = junquote(v)
+    if d == "null" { d = "" }
+}
+
 func wait_for_approval(db, cmd) (decision) {
     state_set(db, "pending", cmd)
     state_set(db, "status", "awaiting")
     journal(db, "confirm", "AWAITING APPROVAL for destructive command: " + first_n(cmd, 400))
     hub_sync(db)                            // report the park immediately -> hub emails you the one-tap links
+    maa_park_notify(db, cmd)                // hosted runs: park travels to the maa hub
     decision = ""
     for decision == "" {
         rows := sqlite_query(db, "SELECT id, cmd, arg FROM mailbox WHERE consumed = 0 ORDER BY id")
@@ -321,6 +351,12 @@ func wait_for_approval(db, cmd) (decision) {
             if hd == "approve" { decision = "approve" }
             if hd == "deny" { decision = "deny" }
             if hd == "stop" { decision = "stop" }
+        }
+        if decision == "" {
+            md := maa_poll(db)
+            if md == "approve" { decision = "approve" }
+            if md == "deny" { decision = "deny" }
+            if md == "stop" { decision = "stop" }
         }
         if decision == "" { sleep(1000) }
     }
@@ -1149,7 +1185,7 @@ func maa_init_job(jobid, goal, model, hub, token, run_id, a) {
     state_set(db, "maxiter", cfg_maxiter(a))
     state_set(db, "tokbudget", cfg_tokens(a))
     state_set(db, "allow_shell", cfg_shell(a))
-    state_set(db, "confirm", "0")
+    state_set(db, "confirm", cfg_confirm(a))
     state_set(db, "maxdenials", cfg_maxdenials(a))
     state_set(db, "denials", "0")
     state_set(db, "verify", cfg_verify(a))
