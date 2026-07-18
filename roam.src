@@ -1217,6 +1217,13 @@ func rhub_report(hub, token, run_id, jobid) {
     st := state_get(db, "status")
     iters := state_get(db, "iters")
     toks := state_get(db, "tokens")
+    // the run's RESULT — the agent's finish summary from the local journal.
+    // This is what the owner actually wants back (a URL, a verdict, a number);
+    // it travels to the hub with run/done and lands on the report webhook.
+    result := ""
+    rrows := sqlite_query(db, "SELECT msg FROM journal WHERE kind = 'system' AND msg LIKE 'agent finished:%' ORDER BY id DESC LIMIT 1", []string{})
+    rv, rerr := json_get(rrows, "[0].msg")
+    if rerr == "" { result = substr(junquote(rv), 16, len(junquote(rv))) }
     sqlite_close(db)
     hdrs := []string{"content-type: application/json", "authorization: Bearer " + token}
     summary := "{\"status\":" + jstr(st) + ",\"iters\":" + jstr(iters) + ",\"tokens\":" + jstr(toks) + ",\"jobid\":" + jstr(jobid) + "}"
@@ -1225,7 +1232,7 @@ func rhub_report(hub, token, run_id, jobid) {
     if e1 != "" || s1 != 200 { write(2, "roam worker: events post failed: " + str(s1) + " " + e1 + " " + first_n(b1, 120) + "\n") }
     reason := st
     if st == "done" { reason = "completed" }
-    dbody := "{\"run_id\":" + jstr(run_id) + ",\"exit_reason\":" + jstr(reason) + "}"
+    dbody := "{\"run_id\":" + jstr(run_id) + ",\"exit_reason\":" + jstr(reason) + ",\"result\":" + jstr(first_n(result, 2000)) + "}"
     s2, b2, e2 := http_request("POST", hub + "/v1/run/done", hdrs, dbody)
     if e2 != "" || s2 != 200 { write(2, "roam worker: done post failed: " + str(s2) + " " + e2 + " " + first_n(b2, 120) + "\n") }
 }
