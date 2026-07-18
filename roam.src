@@ -301,24 +301,24 @@ func is_destructive(cmd) (b) {
 // mailbox) until an operator approves/denies — or stops the job. This is the async
 // human-in-the-loop gate: roam is non-interactive, so approval is a mailbox message
 // (`roam approve|deny`), usable identically by a human or a supervising agent.
-// maa_park_notify / maa_poll — the machin-agents leg of the confirm-gate.
-// A hosted run has NOBODY at a terminal: the park is reported to the maa hub
+// rhub_park_notify / rhub_poll — the roam-hub leg of the confirm-gate.
+// A hosted run has NOBODY at a terminal: the park is reported to the roam-hub hub
 // (needs_human) and the decision comes back via the hub's decision endpoint
-// (maa approve/deny by the owning agent). Both are no-ops for normal jobs.
-func maa_park_notify(db, cmd) {
-    mr := state_get(db, "maa_run")
+// (rhub approve/deny by the owning agent). Both are no-ops for normal jobs.
+func rhub_park_notify(db, cmd) {
+    mr := state_get(db, "rhub_run")
     if mr == "" { return }
     hub := state_get(db, "api_base")
     tok := state_get(db, "api_key")
     hdrs := []string{"content-type: application/json", "authorization: Bearer " + tok}
     body := "{\"run_id\":" + jstr(mr) + ",\"command\":" + jstr(first_n(cmd, 400)) + "}"
     s, b, e := http_request("POST", hub + "/v1/run/needs-human", hdrs, body)
-    if e != "" || s != 200 { journal(db, "confirm", "maa park notify failed: " + str(s) + " " + e + " " + first_n(b, 120)) }
+    if e != "" || s != 200 { journal(db, "confirm", "roam-hub park notify failed: " + str(s) + " " + e + " " + first_n(b, 120)) }
 }
 
-func maa_poll(db) (d) {
+func rhub_poll(db) (d) {
     d = ""
-    mr := state_get(db, "maa_run")
+    mr := state_get(db, "rhub_run")
     if mr == "" { return d }
     hub := state_get(db, "api_base")
     tok := state_get(db, "api_key")
@@ -335,7 +335,7 @@ func wait_for_approval(db, cmd) (decision) {
     state_set(db, "status", "awaiting")
     journal(db, "confirm", "AWAITING APPROVAL for destructive command: " + first_n(cmd, 400))
     hub_sync(db)                            // report the park immediately -> hub emails you the one-tap links
-    maa_park_notify(db, cmd)                // hosted runs: park travels to the maa hub
+    rhub_park_notify(db, cmd)                // hosted runs: park travels to the roam-hub hub
     decision = ""
     for decision == "" {
         rows := sqlite_query(db, "SELECT id, cmd, arg FROM mailbox WHERE consumed = 0 ORDER BY id")
@@ -353,7 +353,7 @@ func wait_for_approval(db, cmd) (decision) {
             if hd == "stop" { decision = "stop" }
         }
         if decision == "" {
-            md := maa_poll(db)
+            md := rhub_poll(db)
             if md == "approve" { decision = "approve" }
             if md == "deny" { decision = "deny" }
             if md == "stop" { decision = "stop" }
@@ -400,7 +400,7 @@ func judge_call(db, sys, usr) (txt) {
     if state_get(db, "provider") == "openai" {
         body := "{\"model\":" + jstr(model) + ",\"max_tokens\":500,\"messages\":[{\"role\":\"system\",\"content\":" + jstr(sys) + "},{\"role\":\"user\",\"content\":" + jstr(usr) + "}]}"
         hdrs := []string{"Authorization: Bearer " + key, "content-type: application/json"}
-        if maa_hdr(db) != "" { hdrs = append(hdrs, maa_hdr(db)) }
+        if rhub_hdr(db) != "" { hdrs = append(hdrs, rhub_hdr(db)) }
         st, resp := http_post_retry(apibase + "/chat/completions", hdrs, body)
         if st != 200 { return txt }
         c, _ := json_get(resp, ".choices[0].message.content")
@@ -413,7 +413,7 @@ func judge_call(db, sys, usr) (txt) {
         return txt
     }
     body := "{\"model\":" + jstr(model) + ",\"max_tokens\":500,\"system\":" + jstr(sys) + ",\"messages\":[{\"role\":\"user\",\"content\":" + jstr(usr) + "}]}"
-    st, resp := call_api(apibase + "/v1/messages", key, body, maa_hdr(db))
+    st, resp := call_api(apibase + "/v1/messages", key, body, rhub_hdr(db))
     if st != 200 { return txt }
     c, _ := json_get(resp, ".content[0].text")
     txt = junquote(c)
@@ -572,13 +572,13 @@ func call_api(url, key, body, extra) (status, resp) {
     status, resp = http_post_retry(url, hdrs, body)
 }
 
-// maa_hdr — when this job is a machin-agents hosted run, every model call must
+// rhub_hdr — when this job is a roam-hub hosted run, every model call must
 // carry the run id so the hub's metered proxy can attribute tokens and enforce
 // the budget/kill switch. Empty for normal (non-hosted) jobs.
-func maa_hdr(db) (h) {
+func rhub_hdr(db) (h) {
     h = ""
-    mr := state_get(db, "maa_run")
-    if mr != "" { h = "x-maa-run: " + mr }
+    mr := state_get(db, "rhub_run")
+    if mr != "" { h = "x-roam-run: " + mr }
 }
 
 var AGENT_SYSTEM = "You are roam, an autonomous agent running unattended on a remote machine. Work toward the user's goal using the provided tools. You are operating autonomously: the user is not watching in real time and cannot answer questions mid-task, so do not ask for confirmation — for reversible actions that follow from the goal, just proceed. All file paths are relative to your working directory. When the goal is complete, call the finish tool with a short summary. Keep any text between tool calls to one brief sentence."
@@ -666,7 +666,7 @@ func agent_loop(db, jobid) {
         if spent >= tokbudget { journal(db, "budget", "token budget reached (" + str(spent) + "/" + str(tokbudget) + ") — halting")  state_set(db, "status", "halted")  worker_close(db)  return }
 
         body := "{\"model\":" + jstr(model) + ",\"max_tokens\":16000,\"system\":" + jstr(AGENT_SYSTEM) + ",\"tools\":" + tools + ",\"messages\":[" + msgs + "]}"
-        status, resp := call_api(url, key, body, maa_hdr(db))
+        status, resp := call_api(url, key, body, rhub_hdr(db))
         if status != 200 { journal(db, "error", "api status " + str(status) + ": " + first_n(resp, 400))  state_set(db, "status", "error")  worker_close(db)  return }
 
         spent = spent + atoi_json(resp, ".usage.input_tokens") + atoi_json(resp, ".usage.output_tokens")
@@ -765,7 +765,7 @@ func agent_loop_openai(db, jobid) {
     url := apibase + "/chat/completions"
     tools := build_tools_openai(allow_shell)
     hdrs := []string{"Authorization: Bearer " + key, "content-type: application/json"}
-    if maa_hdr(db) != "" { hdrs = append(hdrs, maa_hdr(db)) }
+    if rhub_hdr(db) != "" { hdrs = append(hdrs, rhub_hdr(db)) }
 
     journal(db, "system", "agent loop started [openai] (model=" + model + ", maxiter=" + str(maxiter) + ", tokens<=" + str(tokbudget) + ", shell=" + str(allow_shell) + ")")
     msgs := "{\"role\":\"system\",\"content\":" + jstr(AGENT_SYSTEM) + "},{\"role\":\"user\",\"content\":" + jstr(goal) + "}"
@@ -1008,7 +1008,7 @@ func cfg_debri_perm(a) (v) { v = flag(a, "--debri-perm", "dangerous") }  // --pr
 // (below) is what ends a cooperative session promptly.
 func cfg_debri_stable(a) (v) { v = flag(a, "--debri-stable", "300000") }
 func cfg_hub(a) (v) { v = flag(a, "--hub", "") }                              // roam-panel hub URL (opt-in)
-func cfg_panel(a) (v) { v = flag(a, "--panel", env("ROAM_PANEL_URL")) }       // worker mode: roam-panel URL (--hub is the maa hub there)
+func cfg_panel(a) (v) { v = flag(a, "--panel", env("ROAM_PANEL_URL")) }       // worker mode: roam-panel URL (--hub is the roam-hub hub there)
 func cfg_panel_token(a) (v) { v = flag(a, "--panel-token", env("ROAM_HUB_TOKEN")) }
 func cfg_hub_token(a) (v) { v = flag(a, "--hub-token", env("ROAM_HUB_TOKEN")) }  // worker bearer; env by default
 // get_key: the provider-neutral ROAM_API_KEY wins, else ANTHROPIC_API_KEY.
@@ -1159,18 +1159,18 @@ func cmd_ctl(a, cmd) {
     println("{\"ok\":true,\"jobid\":" + jstr(jobid) + ",\"cmd\":" + jstr(cmd) + "}")
 }
 
-// ---- machin-agents worker mode (roam worker) ----------------------------------
-// Pull-based hosted runs: poll a machin-agents hub for due runs, execute each with
+// ---- roam-hub worker mode (roam worker) ----------------------------------
+// Pull-based hosted runs: poll a roam-hub hub for due runs, execute each with
 // the EXISTING agent engine (sandbox workdir, budgets, goal-verify), then report
 // done. The job's api_base is the hub itself — model calls go through the hub's
-// metered LLM proxy (x-api-key = worker token, x-maa-run = run id), so this
+// metered LLM proxy (x-api-key = worker token, x-roam-run = run id), so this
 // worker needs NO model key of its own.
 
-// maa_init_job mirrors init_job but for a hub-dispatched run: goal/model come
-// from the hub's work item, api_base/api_key point at the hub, and maa_run tags
+// rhub_init_job mirrors init_job but for a hub-dispatched run: goal/model come
+// from the hub's work item, api_base/api_key point at the hub, and rhub_run tags
 // every model call for metering. Shell stays OFF unless --allow-shell (the
 // hosted "Report" rung is read-only).
-func maa_init_job(jobid, goal, model, hub, token, run_id, a) {
+func rhub_init_job(jobid, goal, model, hub, token, run_id, a) {
     db := open_db(db_path(jobid))
     ensure_schema(db)
     state_set(db, "status", "running")
@@ -1199,20 +1199,20 @@ func maa_init_job(jobid, goal, model, hub, token, run_id, a) {
     state_set(db, "debri_stable", "300000")
     state_set(db, "jobid", jobid)
     // --panel wires hosted runs into roam-panel (live view + park emails +
-    // one-tap approve/deny). Distinct from --hub, which is the maa hub here.
+    // one-tap approve/deny). Distinct from --hub, which is the roam-hub hub here.
     state_set(db, "hub", cfg_panel(a))
     state_set(db, "hub_token", cfg_panel_token(a))
     state_set(db, "hub_last_id", "0")
     state_set(db, "api_key", token)
-    state_set(db, "maa_run", run_id)
-    journal(db, "system", "maa hosted run " + run_id + " (goal=" + goal + ")")
+    state_set(db, "rhub_run", run_id)
+    journal(db, "system", "roam-hub hosted run " + run_id + " (goal=" + goal + ")")
     sqlite_close(db)
 }
 
-// maa_report posts the finished job's outcome back to the hub: one summary
+// rhub_report posts the finished job's outcome back to the hub: one summary
 // event (final status, iters, tokens, tail of the local journal) + run/done.
 // One attempt each — the hub journals delivery either way and never blocks.
-func maa_report(hub, token, run_id, jobid) {
+func rhub_report(hub, token, run_id, jobid) {
     db := open_db(db_path(jobid))
     st := state_get(db, "status")
     iters := state_get(db, "iters")
@@ -1230,10 +1230,10 @@ func maa_report(hub, token, run_id, jobid) {
     if e2 != "" || s2 != 200 { write(2, "roam worker: done post failed: " + str(s2) + " " + e2 + " " + first_n(b2, 120) + "\n") }
 }
 
-func cmd_maa_worker(a) {
-    hub := flag(a, "--hub", env("MAA_HUB"))
-    token := flag(a, "--token", env("MAA_WORKER_TOKEN"))
-    if hub == "" || token == "" { write(2, "{\"ok\":false,\"error\":\"worker mode needs --hub <url> and --token <maw_...> (or MAA_HUB/MAA_WORKER_TOKEN)\"}\n")  exit(64) }
+func cmd_rhub_worker(a) {
+    hub := flag(a, "--hub", env("RHUB_URL"))
+    token := flag(a, "--token", env("RHUB_TOKEN"))
+    if hub == "" || token == "" { write(2, "{\"ok\":false,\"error\":\"worker mode needs --hub <url> and --token <maw_...> (or RHUB_URL/RHUB_TOKEN)\"}\n")  exit(64) }
     poll := atoi(flag(a, "--poll-secs", "20"))
     if poll < 1 { poll = 20 }
     once := has_flag(a, "--once")
@@ -1257,12 +1257,12 @@ func cmd_maa_worker(a) {
                     write(2, "roam worker: bad work item: " + first_n(resp, 200) + "\n")
                     sleep(poll * 1000)
                 } else {
-                    jobid := "maa" + substr(run_id, 0, 8)
+                    jobid := "rhub" + substr(run_id, 0, 8)
                     write(2, "roam worker: run " + run_id + " -> job " + jobid + "\n")
-                    maa_init_job(jobid, goal, model, hub, token, run_id, a)
+                    rhub_init_job(jobid, goal, model, hub, token, run_id, a)
                     db := open_db(db_path(jobid))
                     if cfg_provider(a) == "openai" { agent_loop_openai(db, jobid) } else { agent_loop(db, jobid) }
-                    maa_report(hub, token, run_id, jobid)
+                    rhub_report(hub, token, run_id, jobid)
                     write(2, "roam worker: run " + run_id + " reported\n")
                     if once { done = 1 }
                 }
@@ -1291,7 +1291,7 @@ func usage() {
     write(2, "     --verify checks the goal (independent judge) before accepting finish,\n")
     write(2, "       --max-verify <n> halts after n failed verifies [default 2];\n")
     write(2, "     agent mode reads the API key from ROAM_API_KEY or ANTHROPIC_API_KEY)\n")
-    write(2, "  roam worker --hub <url> --token <maw_...>   # machin-agents hosted-run worker\n")
+    write(2, "  roam worker --hub <url> --token <maw_...>   # roam-hub hosted-run worker\n")
     write(2, "    flags: --poll-secs <n> [20]  --once  --allow-shell  --confirm  --verify\n           --panel <roam-panel-url> --panel-token <t>   # park emails + one-tap approve\n")
     write(2, "    (pull-based: polls the hub for due runs, executes with this engine,\n")
     write(2, "     model calls go through the hub's metered proxy — no local API key)\n")
@@ -1308,7 +1308,7 @@ func main() {
     if len(a) < 2 { usage()  exit(64) }
     cmd := a[1]
     if cmd == "send"   { cmd_send(a)    return }
-    if cmd == "worker" { cmd_maa_worker(a)  return }
+    if cmd == "worker" { cmd_rhub_worker(a)  return }
     if cmd == "_boot"  { cmd_boot(a)    return }
     if cmd == "_work"  { cmd_work(a)    return }
     if cmd == "status" { cmd_status(a)  return }
