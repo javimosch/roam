@@ -1233,8 +1233,17 @@ func rhub_report(hub, token, run_id, jobid) {
     reason := st
     if st == "done" { reason = "completed" }
     dbody := "{\"run_id\":" + jstr(run_id) + ",\"exit_reason\":" + jstr(reason) + ",\"result\":" + jstr(first_n(result, 2000)) + "}"
-    s2, b2, e2 := http_request("POST", hub + "/v1/run/done", hdrs, dbody)
-    if e2 != "" || s2 != 200 { write(2, "roam worker: done post failed: " + str(s2) + " " + e2 + " " + first_n(b2, 120) + "\n") }
+    // retry run/done: a script deploy can restart the hub UNDER this report —
+    // the first POST lands in the restart window and the run orphans as
+    // 'running' until reclaim. Bounded retries close that gap.
+    tries := 0
+    for tries < 8 {
+        s2, b2, e2 := http_request("POST", hub + "/v1/run/done", hdrs, dbody)
+        if e2 == "" && s2 == 200 { return }
+        write(2, "roam worker: done post failed (try " + str(tries + 1) + "): " + str(s2) + " " + e2 + " " + first_n(b2, 120) + "\n")
+        sleep(3000)
+        tries = tries + 1
+    }
 }
 
 // ---- script executor (kind: 'script') -----------------------------------------
