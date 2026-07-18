@@ -815,7 +815,7 @@ func agent_loop_openai(db, jobid) {
                     res = fres
                     if fdone == 1 { finished = 1  finishmsg = res }
                 }
-                _ = iserr
+                if iserr == 1 { iserr = 1 }   // (kept referenced; machin 0.108 rejects _ = x)
                 toolmsgs = append(toolmsgs, "{\"role\":\"tool\",\"tool_call_id\":" + jstr(id) + ",\"content\":" + jstr(res) + "}")
                 ti = ti + 1
             }
@@ -1237,6 +1237,91 @@ func rhub_report(hub, token, run_id, jobid) {
     if e2 != "" || s2 != 200 { write(2, "roam worker: done post failed: " + str(s2) + " " + e2 + " " + first_n(b2, 120) + "\n") }
 }
 
+// ---- script executor (kind: 'script') -----------------------------------------
+// DETERMINISTIC runs: an ordered step list executes with NO model calls. Each
+// step journals locally AND posts a step event to the hub. gate:true parks the
+// step for a human verdict through the SAME wait_for_approval machinery agents
+// use (hub needs-human/decision + roam-panel one-tap); implicitly-destructive
+// commands park too via exec_tool's confirm gate when --confirm is set.
+// on_failure 'abort' reports the failing step honestly; 'agent' hands the
+// failure context to the LLM loop — intelligence only at exceptions.
+
+func rhub_step_event(db, name, okflag, tail) {
+    mr := state_get(db, "rhub_run")
+    if mr == "" { return }
+    hub := state_get(db, "api_base")
+    tok := state_get(db, "api_key")
+    hdrs := []string{"content-type: application/json", "authorization: Bearer " + tok}
+    oks := "false"
+    if okflag == 1 { oks = "true" }
+    data := "{\"name\":" + jstr(name) + ",\"ok\":" + oks + ",\"tail\":" + jstr(first_n(tail, 400)) + "}"
+    body := "{\"run_id\":" + jstr(mr) + ",\"kind\":\"step\",\"data\":" + jstr(data) + "}"
+    s, sb, serr := http_request("POST", hub + "/v1/run/events", hdrs, body)
+    if serr != "" || s != 200 { journal(db, "error", "step event post failed: " + str(s) + " " + first_n(sb, 80)) }
+}
+
+func rhub_script_run(db, jobid, steps_json, on_failure, a) {
+    workdir := roam_home() + "/work/" + jobid
+    mkdir_p2(roam_home() + "/work", workdir)
+    journal(db, "system", "script executor started (deterministic, no model)")
+    i := 0
+    failed_name := ""
+    failed_out := ""
+    for failed_name == "" {
+        cv, cerr := json_get(steps_json, "[" + str(i) + "].run")
+        if cerr != "" { break }
+        cmd := junquote(cv)
+        nv, nerr := json_get(steps_json, "[" + str(i) + "].name")
+        name := "step-" + str(i + 1)
+        if nerr == "" && junquote(nv) != "" { name = junquote(nv) }
+        gv, gerr := json_get(steps_json, "[" + str(i) + "].gate")
+        gated := 0
+        if gerr == "" && junquote(gv) == "true" { gated = 1 }
+        if gated == 1 && is_destructive(cmd) == 0 {
+            // explicit gate on a command the detector wouldn't park
+            decision := wait_for_approval(db, cmd)
+            if decision == "stop" { return }
+            if decision == "deny" {
+                journal(db, "confirm", "step '" + name + "' denied — script aborted")
+                rhub_step_event(db, name, 0, "denied at the gate")
+                state_set(db, "status", "denied")
+                journal(db, "system", "agent finished: script aborted — step '" + name + "' denied at the gate")
+                return
+            }
+        }
+        res, iserr := exec_tool(db, "run_shell", "{\"command\":" + jstr(cmd) + "}", workdir, 1)
+        if is_terminal(state_get(db, "status")) == 1 { return }   // stopped/denied during exec_tool's own gate
+        // run_shell reports non-zero exits as tool RESULTS (the agent loop reads
+        // them in text) — a script executor must treat them as step failures.
+        okflag := 1
+        if iserr == 1 { okflag = 0 }
+        if has_suffix(trim(res), "[exit 0]") == false { okflag = 0 }
+        journal(db, "work", "step '" + name + "' exit_ok=" + str(okflag) + ": " + first_n(res, 200))
+        rhub_step_event(db, name, okflag, res)
+        if okflag == 0 {
+            failed_name = name
+            failed_out = res
+        }
+        i = i + 1
+    }
+    if failed_name == "" {
+        state_set(db, "status", "done")
+        journal(db, "system", "agent finished: script completed — " + str(i) + "/" + str(i) + " steps ok")
+        return
+    }
+    if on_failure != "agent" {
+        state_set(db, "status", "error")
+        journal(db, "system", "agent finished: script FAILED at step '" + failed_name + "': " + first_n(failed_out, 300))
+        return
+    }
+    // hand the failure to the LLM loop — the exception handler
+    journal(db, "system", "step '" + failed_name + "' failed — escalating to the agent loop")
+    rhub_step_event(db, "escalate-to-agent", 1, "step '" + failed_name + "' failed; the model takes over")
+    goal := "You are the failure handler for a deterministic script run. Step '" + failed_name + "' of this script failed:\n\n" + steps_json + "\n\nFailing step output:\n" + first_n(failed_out, 1200) + "\n\nOriginal purpose: " + state_get(db, "goal") + "\n\nDiagnose the failure using the shell. If you can fix it safely, fix it and re-run the failing step to prove it. Then call the finish tool with a one-line summary of what failed, what you did, and the current state."
+    state_set(db, "goal", goal)
+    if cfg_provider(a) == "openai" { agent_loop_openai(db, jobid) } else { agent_loop(db, jobid) }
+}
+
 func cmd_rhub_worker(a) {
     hub := flag(a, "--hub", env("RHUB_URL"))
     token := flag(a, "--token", env("RHUB_TOKEN"))
@@ -1265,10 +1350,21 @@ func cmd_rhub_worker(a) {
                     sleep(poll * 1000)
                 } else {
                     jobid := "rhub" + substr(run_id, 0, 8)
-                    write(2, "roam worker: run " + run_id + " -> job " + jobid + "\n")
+                    kv, kerr2 := json_get(resp, ".kind")
+                    if kerr2 != "" { kv = "" }
+                    kind := junquote(kv)
+                    write(2, "roam worker: run " + run_id + " -> job " + jobid + " (" + kind + ")\n")
                     rhub_init_job(jobid, goal, model, hub, token, run_id, a)
                     db := open_db(db_path(jobid))
-                    if cfg_provider(a) == "openai" { agent_loop_openai(db, jobid) } else { agent_loop(db, jobid) }
+                    if kind == "script" {
+                        stepsv, serr2 := json_get(resp, ".steps")
+                        if serr2 != "" { stepsv = "[]" }
+                        onfv, oerr2 := json_get(resp, ".on_failure")
+                        if oerr2 != "" { onfv = "" }
+                        rhub_script_run(db, jobid, stepsv, junquote(onfv), a)
+                    } else {
+                        if cfg_provider(a) == "openai" { agent_loop_openai(db, jobid) } else { agent_loop(db, jobid) }
+                    }
                     rhub_report(hub, token, run_id, jobid)
                     write(2, "roam worker: run " + run_id + " reported\n")
                     if once { done = 1 }
