@@ -17,6 +17,22 @@ and filed a PR that was reviewed and **merged**
 ([machin#433](https://github.com/javimosch/machin/pull/433)). One static binary, no Python on
 the target.
 
+## Telemetry — opt-IN, and off until you say otherwise
+
+roam reports **nothing** unless you run `roam telemetry --telemetry-on`. A fresh
+install makes zero outbound connections beyond the work you asked it to do —
+verified with `strace`.
+
+That is stricter than the rest of the estate on purpose: you `scp` roam onto a
+VM and leave it running unattended, often on a machine you do not own. A binary
+someone copied to a third-party server that quietly contacts the network is the
+thing that destroys trust in a tool like this.
+
+If you do enable it, it sends version, os/arch, which verb ran and whether it
+failed — never prompts, keys, output, hostnames or paths. `roam telemetry`
+prints the exact payload.
+[cli-telemetry-spec](https://github.com/javimosch/cli-telemetry-spec) §2.4.
+
 ## Install
 
 Grab the static binary from [Releases](https://github.com/javimosch/roam/releases)

@@ -1431,6 +1431,17 @@ func main() {
     if cmd == "stop"   { cmd_ctl(a, "stop")    return }
     if cmd == "approve" { cmd_ctl(a, "approve")  return }
     if cmd == "deny"    { cmd_ctl(a, "deny")     return }
+    if cmd == "telemetry" {
+        if tel_hasflag(a, "--telemetry-off") == 1 {
+            td, tok := tel_set(0)
+            println(td)
+            if tok == 0 { exit(90) }
+            return
+        }
+        if tel_hasflag(a, "--telemetry-on") == 1 { td, tok := tel_set(1)  println(td)  return }
+        println(tel_status_json())
+        return
+    }
     if cmd == "help"   { usage()  return }
     write(2, "roam: unknown command: " + cmd + "\n")
     usage()
