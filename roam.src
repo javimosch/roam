@@ -1474,6 +1474,7 @@ func usage() {
     write(2, "  roam approve <host|jobid|last>     # allow a parked destructive command\n")
     write(2, "  roam deny    <host|jobid|last>     # refuse it (agent adapts)\n")
     write(2, "  roam stop    <host|jobid|last>\n")
+    write(2, "  roam version                       # {tool, version, providers} as JSON\n")
 }
 
 func main() {
@@ -1501,6 +1502,15 @@ func main() {
         }
         if tel_hasflag(a, "--telemetry-on") == 1 { td, tok := tel_set(1)  println(td)  return }
         println(tel_status_json())
+        return
+    }
+    if cmd == "version" || cmd == "--version" || cmd == "-v" {
+        // A binary you scp onto someone else's box has to be able to say what
+        // it is. Without this the only way to check a deployed roam was to
+        // `strings` it — which is how a stale version constant went unnoticed
+        // for a whole release.
+        println("{\"ok\":true,\"tool\":\"roam\",\"version\":\"" + roam_version() +
+            "\",\"providers\":[\"anthropic\",\"openai\",\"debri\"]}")
         return
     }
     if cmd == "help"   { usage()  return }

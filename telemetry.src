@@ -305,7 +305,7 @@ func tel_status_json() (tjson) {
 // third-party server that quietly contacts the network is exactly the thing that
 // destroys trust in a tool like this — so it reports nothing until the operator
 // runs `roam telemetry --telemetry-on`. Spec §2.4.
-func roam_version()  (tstr) { tstr = "0.2.0" }
+func roam_version()  (tstr) { tstr = "0.3.0" }
 func tel_tool()      (tstr) { tstr = "roam" }
 func tel_version()   (tstr) { tstr = roam_version() }
 func tel_envprefix() (tstr) { tstr = "ROAM" }
