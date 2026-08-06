@@ -1,5 +1,5 @@
 # roam — build targets. Requires the `machin` compiler (github.com/javimosch/machin).
-VERSION ?= 0.1.0
+VERSION ?= 0.2.1
 
 .PHONY: build release clean
 
