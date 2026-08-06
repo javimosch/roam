@@ -23,22 +23,83 @@ type MRow struct { id int  cmd string  arg string }
 // ---- small helpers ------------------------------------------------------------
 
 // jstr JSON-encodes a string (no json-encode builtin yet): quote + escape.
+func hex2(c) (h) {
+    d := "0123456789abcdef"
+    h = substr(d, c / 16, c / 16 + 1) + substr(d, c % 16, c % 16 + 1)
+}
+
+// jstr — a JSON string that is always legal JSON.
+//
+// It used to escape five characters and pass every other byte through raw. A
+// JSON string may not contain a raw control byte, and the whole request must be
+// valid UTF-8, so ONE tool result carrying either — `cat` on a binary, a
+// filename with stray bytes, or a multi-byte character sliced in half by
+// truncation — produced a malformed request and the API answered `400 JSON
+// parsing failed`. The run died with an error that named nothing.
+//
+// So: control bytes become \u00XX, and any byte sequence that is not valid
+// UTF-8 becomes U+FFFD rather than being copied through.
 func jstr(s) (out) {
     b := bytes(s)
     r := "\""
     i := 0
     for i < len(b) {
         c := byte_at(b, i)
-        if c == 34 { r = r + "\\\"" } else {
-        if c == 92 { r = r + "\\\\" } else {
-        if c == 10 { r = r + "\\n" } else {
-        if c == 9 { r = r + "\\t" } else {
-        if c == 13 { r = r + "\\r" } else {
-            r = r + substr(s, i, i + 1)
-        }}}}}
-        i = i + 1
+        if c == 34 { r = r + "\\\""  i = i + 1  continue }
+        if c == 92 { r = r + "\\\\"  i = i + 1  continue }
+        if c == 10 { r = r + "\\n"  i = i + 1  continue }
+        if c == 9  { r = r + "\\t"  i = i + 1  continue }
+        if c == 13 { r = r + "\\r"  i = i + 1  continue }
+        if c < 32 || c == 127 { r = r + "\\u00" + hex2(c)  i = i + 1  continue }
+        if c < 128 { r = r + substr(s, i, i + 1)  i = i + 1  continue }
+
+        // A multi-byte sequence is copied verbatim only if it is well-formed.
+        need := 0 - 1
+        if c >= 194 && c <= 223 { need = 1 }
+        if c >= 224 && c <= 239 { need = 2 }
+        if c >= 240 && c <= 244 { need = 3 }
+        if need < 0 || i + need >= len(b) { r = r + "\\ufffd"  i = i + 1  continue }
+        good := 1
+        k := 1
+        for k <= need {
+            cc := byte_at(b, i + k)
+            if cc < 128 || cc > 191 { good = 0 }
+            k = k + 1
+        }
+        if good == 0 { r = r + "\\ufffd"  i = i + 1  continue }
+        r = r + substr(s, i, i + need + 1)
+        i = i + need + 1
     }
     out = r + "\""
+}
+
+// looks_binary — is this tool output text at all? A NUL or a stray control byte
+// is the giveaway. Checking a prefix is enough and keeps a big log cheap.
+//
+// Escaping binary would now produce legal JSON, but it would also spend the
+// whole token budget describing an ELF header one \u00XX at a time. Refusing to
+// send it is both cheaper and more useful to the model.
+func looks_binary(s) (yes) {
+    yes = 0
+    b := bytes(s)
+    n := len(b)
+    if n > 4096 { n = 4096 }
+    i := 0
+    for i < n {
+        c := byte_at(b, i)
+        if c == 0 { yes = 1  return yes }
+        if c == 127 { yes = 1  return yes }
+        if c < 32 && c != 10 && c != 9 && c != 13 { yes = 1  return yes }
+        i = i + 1
+    }
+}
+
+// text_or_note returns the output, or an explanation of why it is not being
+// shown — phrased so the model does something useful next instead of retrying.
+func text_or_note(raw, what) (out) {
+    if looks_binary(raw) == 0 { out = first_n(raw, 6000)  return out }
+    out = "[" + what + " is binary (" + str(len(bytes(raw))) + " bytes) and was not included. " +
+        "Inspect it with a text-producing command instead: `file`, `strings | head`, `xxd | head`, or `wc -c`.]"
 }
 
 func atoi(s) (n) { n = parse(s, 0) }
@@ -499,7 +560,7 @@ func exec_tool(db, name, argsjson, workdir, allow_shell) (result, iserr) {
         journal(db, "tool", "run_shell: " + first_n(cmd, 200))
         outf := workdir + "/.roam_tool_out"
         rc := system("cd " + workdir + " && (" + cmd + ") > " + outf + " 2>&1")
-        result = first_n(read_file(outf), 6000) + "\n[exit " + str(rc) + "]"
+        result = text_or_note(read_file(outf), "the command output") + "\n[exit " + str(rc) + "]"
         return result, iserr
     }
     if name == "read_file" {
@@ -508,7 +569,7 @@ func exec_tool(db, name, argsjson, workdir, allow_shell) (result, iserr) {
         full, ok := safe_path(workdir, p)
         if ok == 0 { result = "path not allowed (must be relative, inside the workdir): " + p  iserr = 1  return result, iserr }
         journal(db, "tool", "read_file: " + p)
-        result = first_n(read_file(full), 6000)
+        result = text_or_note(read_file(full), "that file")
         return result, iserr
     }
     if name == "write_file" {

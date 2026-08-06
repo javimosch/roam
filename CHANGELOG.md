@@ -5,6 +5,22 @@ A browsable version with product + technical views lives under [`docs/`](docs/ch
 
 ## [Unreleased]
 
+### Fixed
+- **A binary tool result no longer kills the run.** `jstr` escaped five characters and
+  passed every other byte through raw, so a single control byte or a malformed UTF-8
+  sequence in a tool result produced an invalid request body and the API answered
+  `400 JSON parsing failed` — the job died with an error naming nothing. One `cat` on a
+  binary was enough, which for an agent inspecting a filesystem is a matter of time.
+  Two changes: `jstr` now escapes control bytes as `\u00XX` and replaces any byte
+  sequence that is not well-formed UTF-8 with `U+FFFD`; and `run_shell` / `read_file`
+  detect non-text output and return `[… is binary (N bytes) and was not included. Inspect
+  it with `file`, `strings | head`, `xxd | head`, or `wc -c`]` instead of the bytes.
+  Escaping alone would have been legal JSON but would have spent the whole token budget
+  describing an ELF header, so the refusal is both cheaper and more useful — in testing
+  the agent read the note and reached for `xxd | head` on its own.
+  Reproduced deterministically before the fix, green after: `cat /usr/bin/du`,
+  `head -c 200 /usr/bin/ls`, and a command emitting raw `\377\376`.
+
 ### Added
 - **Session-level approval for `--provider debri`** (closes #5). devin owns its per-command
   permissions in `-p` mode, so the confirm-gate can't intercept individual debri commands.
