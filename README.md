@@ -17,6 +17,18 @@ and filed a PR that was reviewed and **merged**
 ([machin#433](https://github.com/javimosch/machin/pull/433)). One static binary, no Python on
 the target.
 
+## Agent-first discovery
+
+The binary carries its own operator model and command catalog, so a supervising agent does not need the website or source tree:
+
+```bash
+roam guide              # structured JSON: model, loop, concepts, examples, gotchas
+roam guide --human      # readable Markdown
+roam help-json           # machine-readable commands, flags, exits, and environment
+```
+
+Controller errors use typed JSON on stderr and semantic exits: `80-89` for invalid input, `90-99` for missing resources or authentication, and `100-109` for remote/external failures. One-shot command results remain on stdout; worker/attach progress remains on stderr.
+
 ## Telemetry — opt-IN, and off until you say otherwise
 
 roam reports **nothing** unless you run `roam telemetry --telemetry-on`. A fresh

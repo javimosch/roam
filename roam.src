@@ -102,6 +102,18 @@ func text_or_note(raw, what) (out) {
         "Inspect it with a text-producing command instead: `file`, `strings | head`, `xxd | head`, or `wc -c`.]"
 }
 
+// fail emits the shared agent-first error envelope on stderr and exits with the
+// same semantic code. Keep suggestions as executable next steps when possible.
+func fail(code, typ, msg, suggestion) {
+    rec := "false"
+    if code >= 100 { rec = "true" }
+    suggestions := "[]"
+    if suggestion != "" { suggestions = "[" + jstr(suggestion) + "]" }
+    body := "{\"ok\":false,\"error\":{\"code\":" + str(code) + ",\"type\":" + jstr(typ) + ",\"message\":" + jstr(msg) + ",\"recoverable\":" + rec + ",\"suggestions\":" + suggestions + "}}"
+    write(2, body + "\n")
+    exit(code)
+}
+
 func atoi(s) (n) { n = parse(s, 0) }
 
 func flag(a, name, def) (v) {
@@ -220,7 +232,8 @@ func init_job(jobid, goal, every, host, a) {
 func spawn_worker(jobid) {
     self := args()[0]
     logp := roam_home() + "/" + jobid + ".log"
-    system("setsid " + self + " _work " + jobid + " </dev/null >> " + logp + " 2>&1 &")
+    pidp := roam_home() + "/" + jobid + ".pid"
+    system("setsid " + self + " _work " + jobid + " </dev/null >> " + logp + " 2>&1 & echo $! > " + pidp)
 }
 
 // ---- target resolution: a control target is a local jobid or a remote host handle ----
@@ -242,10 +255,18 @@ func resolve_target(arg) (host, jobid, remote) {
     }
     jobid = t
 }
-// remote_exec runs the SAME roam subcommand on the remote against its own journal; ssh
-// streams the remote's stdout/stderr straight back (so `attach` is live over the pipe).
+// remote_exec runs the SAME roam subcommand on the remote against its own journal.
+// Attach is intentionally live; one-shot controller commands are captured so a failed
+// remote invocation cannot leak a second data/error envelope before the local one.
 func remote_exec(host, sub, jobid, extra) (rc) {
-    rc = system("ssh " + host + " '~/.roam/roam " + sub + " " + jobid + extra + "'")
+    cmd := "ssh " + host + " '~/.roam/roam " + sub + " " + jobid + extra + "'"
+    if sub == "attach" { rc = system(cmd)  return rc }
+    code, out, err := exec(cmd)
+    rc = code
+    if rc == 0 {
+        if out != "" { write(1, out) }
+        if err != "" { write(2, err) }
+    }
 }
 
 // ---- worker -------------------------------------------------------------------
@@ -1107,6 +1128,7 @@ func cmd_send(a) {
     key := get_key()
     jobid := to_hex(rand_bytes(4))   // decided by the controller, shipped to the remote
 
+    if goal == "" { fail(82, "missing_goal", "--goal <text> is required", "roam send --local --goal <text>") }
     if local {
         init_job(jobid, goal, every, "local", a)
         spawn_worker(jobid)
@@ -1115,12 +1137,12 @@ func cmd_send(a) {
         return
     }
 
-    if to == "" { write(2, "{\"ok\":false,\"error\":\"--to <host> required (or --local)\"}\n")  exit(64) }
-    if kind == "agent" && provider != "debri" && key == "" { write(2, "{\"ok\":false,\"error\":\"ANTHROPIC_API_KEY not set (agent mode); export it, or use --tick / --provider debri\"}\n")  exit(64) }
+    if to == "" { fail(82, "missing_target", "--to <host> required (or --local)", "roam send --local --goal <text>") }
+    if kind == "agent" && provider != "debri" && key == "" { fail(90, "not_authenticated", "ANTHROPIC_API_KEY or ROAM_API_KEY is required for agent mode", "export ANTHROPIC_API_KEY=sk-ant-...") }
     // self-replicate: ship this exact binary to the remote, then boot the job there.
     self := args()[0]
-    if system("ssh " + to + " 'mkdir -p ~/.roam'") != 0 { write(2, "{\"ok\":false,\"error\":\"ssh " + to + " failed\"}\n")  exit(100) }
-    if system("scp -q " + self + " " + to + ":.roam/roam") != 0 { write(2, "{\"ok\":false,\"error\":\"scp to " + to + " failed\"}\n")  exit(100) }
+    if system("ssh " + to + " 'mkdir -p ~/.roam'") != 0 { fail(100, "connection_error", "ssh " + to + " failed", "check host reachability and SSH credentials") }
+    if system("scp -q " + self + " " + to + ":.roam/roam") != 0 { fail(100, "connection_error", "scp to " + to + " failed", "check host reachability and SSH credentials") }
     system("ssh " + to + " 'chmod +x ~/.roam/roam'")
     // config as flags; the API key rides as an env var on the remote command (kept out
     // of the arg list). --goal MUST be last (flag_rest consumes the remainder as goal).
@@ -1136,7 +1158,7 @@ func cmd_send(a) {
     bootcmd := "ssh " + to + " 'ROAM_API_KEY=" + key + " ROAM_HUB_TOKEN=" + hubtoken + " ~/.roam/roam _boot " + jobid + " " + every + cfgflags + " --goal-b64 " + base64_encode(goal) + "' >/dev/null"
     // _boot inits the job DB + detaches the worker on the remote; its stdout is
     // suppressed so the controller emits exactly one JSON answer.
-    if system(bootcmd) != 0 { write(2, "{\"ok\":false,\"error\":\"remote boot failed\"}\n")  exit(100) }
+    if system(bootcmd) != 0 { fail(100, "remote_boot_failed", "remote boot failed", "check the target's ~/.roam/roam binary and SSH access") }
     mkdir(roam_home() + "/hosts")
     write_file(hosts_path(to), jobid)
     write_file(roam_home() + "/last", to)
@@ -1147,21 +1169,24 @@ func cmd_send(a) {
 // positional args; config comes from flags; --goal (multi-word) is last. The API key
 // arrives via the ANTHROPIC_API_KEY env var on the ssh command.
 func cmd_boot(a) {
-    if len(a) < 4 { write(2, "roam _boot: needs <jobid> <every> [flags] --goal <goal...>\n")  exit(64) }
+    if len(a) < 4 { fail(82, "missing_arguments", "roam _boot needs <jobid> <every> [flags] --goal <goal...>", "roam help-json") }
     jobid := a[2]
     every := a[3]
     goal := flag_rest(a, "--goal")
     gb := flag(a, "--goal-b64", "")
     if gb != "" { goal = base64_decode(gb) }   // remote path ships the goal base64'd
+    if goal == "" { fail(82, "missing_goal", "_boot requires --goal <text>", "roam help-json") }
     init_job(jobid, goal, every, "self", a)
     spawn_worker(jobid)
     println("{\"ok\":true,\"jobid\":" + jstr(jobid) + "}")
 }
 
 func cmd_status(a) {
-    if len(a) < 3 { write(2, "roam status: needs <host|jobid|last>\n")  exit(64) }
+    if len(a) < 3 { fail(82, "missing_target", "roam status needs <host|jobid|last>", "roam status last") }
     host, jobid, remote := resolve_target(a[2])
-    if remote == 1 { remote_exec(host, "status", jobid, "")  return }
+    if remote == 1 { rc := remote_exec(host, "status", jobid, "")  if rc != 0 { fail(100, "remote_status_failed", "remote status failed", "check host reachability and SSH credentials") }  return }
+    dbkind, _, _ := stat(db_path(jobid))
+    if dbkind != 1 { fail(92, "job_not_found", "job not found: " + jobid, "roam status last") }
     db := open_db(db_path(jobid))
     status := state_get(db, "status")
     kind := state_get(db, "kind")
@@ -1189,9 +1214,11 @@ func cmd_status(a) {
 }
 
 func cmd_attach(a) {
-    if len(a) < 3 { write(2, "roam attach: needs <host|jobid|last>\n")  exit(64) }
+    if len(a) < 3 { fail(82, "missing_target", "roam attach needs <host|jobid|last>", "roam attach last") }
     host, jobid, remote := resolve_target(a[2])
-    if remote == 1 { remote_exec(host, "attach", jobid, "")  return }
+    if remote == 1 { rc := remote_exec(host, "attach", jobid, "")  if rc != 0 { fail(100, "remote_attach_failed", "remote attach failed", "check host reachability and SSH credentials") }  return }
+    dbkind, _, _ := stat(db_path(jobid))
+    if dbkind != 1 { fail(92, "job_not_found", "job not found: " + jobid, "roam attach last") }
     db := open_db(db_path(jobid))
     write(2, "[attach " + jobid + "] streaming journal (Ctrl-C to detach)\n")
     lastid := 0
@@ -1218,13 +1245,15 @@ func cmd_attach(a) {
 }
 
 func cmd_steer(a) {
-    if len(a) < 4 { write(2, "roam steer: needs <host|jobid|last> <message>\n")  exit(64) }
+    if len(a) < 4 { fail(82, "missing_arguments", "roam steer needs <host|jobid|last> <message>", "roam steer last <message>") }
     host, jobid, remote := resolve_target(a[2])
     parts := []string{}
     i := 3
     for i < len(a) { parts = append(parts, a[i])  i = i + 1 }
     msg := join(parts, " ")
-    if remote == 1 { remote_exec(host, "steer", jobid, " \"" + msg + "\"")  return }
+    if remote == 1 { rc := remote_exec(host, "steer", jobid, " \"" + msg + "\"")  if rc != 0 { fail(100, "remote_steer_failed", "remote steer failed", "check host reachability and SSH credentials") }  return }
+    dbkind, _, _ := stat(db_path(jobid))
+    if dbkind != 1 { fail(92, "job_not_found", "job not found: " + jobid, "roam status last") }
     db := open_db(db_path(jobid))
     mailbox_put(db, "note", msg)
     sqlite_close(db)
@@ -1232,9 +1261,11 @@ func cmd_steer(a) {
 }
 
 func cmd_ctl(a, cmd) {
-    if len(a) < 3 { write(2, "roam " + cmd + ": needs <host|jobid|last>\n")  exit(64) }
+    if len(a) < 3 { fail(82, "missing_target", "roam " + cmd + " needs <host|jobid|last>", "roam " + cmd + " last") }
     host, jobid, remote := resolve_target(a[2])
-    if remote == 1 { remote_exec(host, cmd, jobid, "")  return }
+    if remote == 1 { rc := remote_exec(host, cmd, jobid, "")  if rc != 0 { fail(100, "remote_control_failed", "remote " + cmd + " failed", "check host reachability and SSH credentials") }  return }
+    dbkind, _, _ := stat(db_path(jobid))
+    if dbkind != 1 { fail(92, "job_not_found", "job not found: " + jobid, "roam status last") }
     db := open_db(db_path(jobid))
     mailbox_put(db, cmd, "")
     sqlite_close(db)
@@ -1416,7 +1447,7 @@ func rhub_script_run(db, jobid, steps_json, on_failure, a) {
 func cmd_rhub_worker(a) {
     hub := flag(a, "--hub", env("RHUB_URL"))
     token := flag(a, "--token", env("RHUB_TOKEN"))
-    if hub == "" || token == "" { write(2, "{\"ok\":false,\"error\":\"worker mode needs --hub <url> and --token <maw_...> (or RHUB_URL/RHUB_TOKEN)\"}\n")  exit(64) }
+    if hub == "" || token == "" { fail(82, "missing_worker_credentials", "worker mode needs --hub <url> and --token <maw_...> (or RHUB_URL/RHUB_TOKEN)", "roam worker --hub <url> --token <token>") }
     poll := atoi(flag(a, "--poll-secs", "20"))
     if poll < 1 { poll = 20 }
     once := has_flag(a, "--once")
@@ -1469,38 +1500,73 @@ func cmd_rhub_worker(a) {
     }
 }
 
+func guide_json() (g) {
+    g = "{\"roam\":\"an autonomous agent controller and remote worker that journals work and accepts out-of-band control\","
+    g = g + "\"one_liner\":\"roam ships one native binary to a local or remote machine, runs a tick or LLM-backed agent loop, and exposes JSON control/status commands for humans and supervising agents.\","
+    g = g + "\"model\":{\"split\":\"controller dispatches and controls; the same binary becomes a detached worker on the target\",\"storage\":\"each job stores state, journal, and mailbox in ~/.roam/<jobid>.db\",\"providers\":\"anthropic and OpenAI-compatible tool loops, plus debri/Devin delegation\",\"control\":\"status, attach, steer, pause, resume, approve, deny, and stop operate through the local or remote journal\"},"
+    g = g + "\"loop\":[\"run roam help-json and roam guide before driving an unfamiliar binary\",\"dispatch with roam send --local or roam send --to <host> --goal <text>\",\"the controller creates the job and the detached worker journals progress\",\"inspect with roam status <host|jobid|last> or roam attach <host|jobid|last>\",\"steer or stop at checkpoints; approve or deny parked destructive work when --confirm is enabled\",\"the worker reaches done, halted, stopped, or error and reports the final journal\"],"
+    g = g + "\"concepts\":{\"job\":\"a SQLite-backed run identified by a short job id\",\"target\":\"last, a local job id, or a remote host handle in ~/.roam/hosts\",\"journal\":\"append-only audit trail containing model turns, tool calls, controls, and budgets\",\"mailbox\":\"out-of-band control channel consumed at safe worker checkpoints\",\"confirm_gate\":\"--confirm parks destructive shell commands until approve, deny, or stop arrives\",\"budgets\":\"--max-iters and --tokens halt a run before it can exceed its configured limits\",\"telemetry\":\"anonymous usage reporting is opt-in; telemetry is disabled until explicitly enabled\"},"
+    g = g + "\"commands\":{\"dispatch\":[\"roam send --local [flags] --goal <text>\",\"roam send --to <host> [flags] --goal <text>\",\"roam worker --hub <url> --token <token>\"],\"observe\":[\"roam status <host|jobid|last>\",\"roam attach <host|jobid|last>\"],\"control\":[\"roam steer <host|jobid|last> <message>\",\"roam pause|resume|stop <host|jobid|last>\",\"roam approve|deny <host|jobid|last>\"],\"introspection\":[\"roam guide [--human]\",\"roam help-json\",\"roam version\",\"roam telemetry\"]},"
+    g = g + "\"examples\":[{\"goal\":\"prove the local controller/worker loop\",\"do\":[\"roam send --local --tick --every 1 --goal demo\",\"roam status last\",\"roam stop last\"]},{\"goal\":\"run an unattended remote agent with a safety gate\",\"do\":[\"export ANTHROPIC_API_KEY=sk-ant-...\",\"roam send --to host --allow-shell --confirm --goal clone repo X and run its tests\",\"roam status host\",\"roam approve host\"]}],"
+    g = g + "\"gotchas\":[\"stdout is JSON data for one-shot controller commands; stderr carries attach/worker context\",\"the goal follows --goal and consumes the remaining arguments, so --goal must be last\",\"--allow-shell is required for run_shell and --confirm is required to park destructive commands\",\"remote dispatch copies the exact binary to ~/.roam/roam and needs SSH plus scp\",\"status and control of a missing local job fail with a typed semantic error instead of creating a database\",\"telemetry is opt-in; use DO_NOT_TRACK=1 or the telemetry command to keep it disabled\"],"
+    g = g + "\"version\":\"" + roam_version() + "\",\"see_also\":[\"roam help-json\",\"roam version\",\"roam telemetry\"]}"
+}
+
+func guide_human() (h) {
+    h = "# roam guide — autonomous remote agent control\n\n"
+    h = h + "roam ships one native binary to a local or remote machine, runs a tick or LLM-backed agent loop, and exposes JSON control/status commands.\n\n"
+    h = h + "## The model\n\n- The controller dispatches and controls. The same binary becomes a detached worker.\n- Each job stores state, an append-only journal, and a mailbox in `~/.roam/<jobid>.db`.\n- Targets are `last`, a local job id, or a remote host handle.\n\n"
+    h = h + "## The loop\n\n1. `roam help-json` and `roam guide` discover the binary.\n2. `roam send --local` or `roam send --to <host>` creates a job.\n3. `roam status` / `roam attach` observe it.\n4. `roam steer`, `pause`, `resume`, `approve`, `deny`, and `stop` control it at checkpoints.\n5. The worker ends in `done`, `halted`, `stopped`, or `error`.\n\n"
+    h = h + "## Commands\n\n- `roam send --local [flags] --goal <text>` — start locally\n- `roam send --to <host> [flags] --goal <text>` — copy and start remotely\n- `roam status <host|jobid|last>` — JSON snapshot\n- `roam attach <host|jobid|last>` — stream the journal\n- `roam steer <target> <message>` — add an operator note\n- `roam pause|resume|stop <target>` — control the worker\n- `roam approve|deny <target>` — answer a confirm gate\n- `roam telemetry` — inspect the opt-in telemetry state\n\n"
+    h = h + "## Gotchas\n\n- `--goal` consumes the remaining arguments and must be last.\n- `--allow-shell` enables shell tools; `--confirm` gates destructive shell commands.\n- Remote dispatch needs SSH and scp.\n- stdout is JSON data for one-shot controller commands; stderr is context.\n- Telemetry is opt-in.\n\nVersion: " + roam_version() + "\n"
+}
+
+func help_json() (h) {
+    h = "{\"schema\":\"roam.help/v1\",\"version\":\"" + roam_version() + "\",\"output\":\"json\",\"interactive\":false,\"commands\":{"
+    h = h + "\"send\":{\"args\":[],\"flags\":[\"--to HOST\",\"--local\",\"--goal TEXT\",\"--every SECONDS\",\"--provider anthropic|openai|debri\",\"--model ID\",\"--max-iters N\",\"--tokens N\",\"--allow-shell\",\"--confirm\",\"--tick\",\"--max-denials N\",\"--verify\",\"--max-verify N\",\"--debri-perm MODE\",\"--debri-stable MS\",\"--api-base URL\",\"--hub URL\",\"--hub-token TOKEN\"],\"auth\":false},"
+    h = h + "\"worker\":{\"args\":[],\"flags\":[\"--hub URL\",\"--token TOKEN\",\"--poll-secs N\",\"--once\",\"--allow-shell\",\"--confirm\",\"--verify\",\"--panel URL\",\"--panel-token TOKEN\"],\"auth\":true},"
+    h = h + "\"status\":{\"args\":[\"TARGET\"],\"auth\":false},\"attach\":{\"args\":[\"TARGET\"],\"auth\":false},\"steer\":{\"args\":[\"TARGET\",\"MESSAGE\"],\"auth\":false},"
+    h = h + "\"pause\":{\"args\":[\"TARGET\"],\"auth\":false},\"resume\":{\"args\":[\"TARGET\"],\"auth\":false},\"stop\":{\"args\":[\"TARGET\"],\"auth\":false},\"approve\":{\"args\":[\"TARGET\"],\"auth\":false},\"deny\":{\"args\":[\"TARGET\"],\"auth\":false},"
+    h = h + "\"guide\":{\"args\":[],\"flags\":[\"--human\"],\"auth\":false},\"help-json\":{\"args\":[],\"flags\":[],\"auth\":false},\"version\":{\"args\":[],\"auth\":false},\"telemetry\":{\"args\":[],\"flags\":[\"--telemetry-on\",\"--telemetry-off\"],\"auth\":false},\"help\":{\"args\":[],\"flags\":[\"--help\",\"-h\"],\"auth\":false},"
+    h = h + "\"_boot\":{\"args\":[\"JOBID\",\"EVERY\"],\"internal\":true},\"_work\":{\"args\":[\"JOBID\"],\"internal\":true}},"
+    h = h + "\"exit_codes\":{\"0\":\"success\",\"80\":\"invalid arguments\",\"82\":\"missing required argument\",\"90\":\"precondition or authentication\",\"92\":\"resource not found\",\"100\":\"external or remote integration error\",\"110\":\"internal error\"},"
+    h = h + "\"env\":[\"ROAM_API_KEY\",\"ANTHROPIC_API_KEY\",\"ROAM_HUB_TOKEN\",\"RHUB_URL\",\"RHUB_TOKEN\",\"ROAM_PANEL_URL\",\"DO_NOT_TRACK\"],\"aliases\":{\"help\":[\"help\",\"--help\",\"-h\"],\"version\":[\"version\",\"--version\",\"-v\"],\"help-json\":[\"help-json\",\"--help-json\"]},\"see_also\":[\"roam guide\",\"roam version\",\"roam telemetry\"]}"
+}
+
 func usage() {
-    write(2, "roam — leave a working agent on a remote box\n")
-    write(2, "usage:\n")
-    write(2, "  roam send --to <host> [flags] --goal <text>   # dispatch an agent (--goal LAST)\n")
-    write(2, "    flags: --local  --allow-shell  --confirm  --tick  --model <id>\n")
-    write(2, "           --provider anthropic|openai|debri  --api-base <url>\n")
-    write(2, "           --max-iters <n>  --tokens <n>  --every <secs>\n")
-    write(2, "    (--provider debri delegates the goal to the devin CLI (SWE-1.x) via\n")
-    write(2, "       debri — subscription, no token cost; --model <SWE-1.7|...>,\n")
-    write(2, "       --debri-perm auto|dangerous [default dangerous]; needs devin authed\n")
-    write(2, "       + debri on PATH on the target; no API key required;\n")
-    write(2, "     --confirm parks destructive shell commands for approval;\n")
-    write(2, "     --max-denials <n> auto-halts after n denials [default 3];\n")
-    write(2, "     --verify checks the goal (independent judge) before accepting finish,\n")
-    write(2, "       --max-verify <n> halts after n failed verifies [default 2];\n")
-    write(2, "     agent mode reads the API key from ROAM_API_KEY or ANTHROPIC_API_KEY)\n")
-    write(2, "  roam worker --hub <url> --token <maw_...>   # roam-hub hosted-run worker\n")
-    write(2, "    flags: --poll-secs <n> [20]  --once  --allow-shell  --confirm  --verify\n           --panel <roam-panel-url> --panel-token <t>   # park emails + one-tap approve\n")
-    write(2, "    (pull-based: polls the hub for due runs, executes with this engine,\n")
-    write(2, "     model calls go through the hub's metered proxy — no local API key)\n")
-    write(2, "  roam status  <host|jobid|last>\n")
-    write(2, "  roam attach  <host|jobid|last>\n")
-    write(2, "  roam steer   <host|jobid|last> <message>\n")
-    write(2, "  roam approve <host|jobid|last>     # allow a parked destructive command\n")
-    write(2, "  roam deny    <host|jobid|last>     # refuse it (agent adapts)\n")
-    write(2, "  roam stop    <host|jobid|last>\n")
-    write(2, "  roam version                       # {tool, version, providers} as JSON\n")
+    write(1, "roam — leave a working agent on a remote box\n")
+    write(1, "usage:\n")
+    write(1, "  roam send --to <host> [flags] --goal <text>   # dispatch an agent (--goal LAST)\n")
+    write(1, "    flags: --local  --allow-shell  --confirm  --tick  --model <id>\n")
+    write(1, "           --provider anthropic|openai|debri  --api-base <url>\n")
+    write(1, "           --max-iters <n>  --tokens <n>  --every <secs>\n")
+    write(1, "    (--provider debri delegates the goal to the devin CLI (SWE-1.x) via\n")
+    write(1, "       debri — subscription, no token cost; --model <SWE-1.7|...>,\n")
+    write(1, "       --debri-perm auto|dangerous [default dangerous]; needs devin authed\n")
+    write(1, "       + debri on PATH on the target; no API key required;\n")
+    write(1, "     --confirm parks destructive shell commands for approval;\n")
+    write(1, "     --max-denials <n> auto-halts after n denials [default 3];\n")
+    write(1, "     --verify checks the goal (independent judge) before accepting finish,\n")
+    write(1, "       --max-verify <n> halts after n failed verifies [default 2];\n")
+    write(1, "     agent mode reads the API key from ROAM_API_KEY or ANTHROPIC_API_KEY)\n")
+    write(1, "  roam worker --hub <url> --token <maw_...>   # roam-hub hosted-run worker\n")
+    write(1, "    flags: --poll-secs <n> [20]  --once  --allow-shell  --confirm  --verify\n           --panel <roam-panel-url> --panel-token <t>   # park emails + one-tap approve\n")
+    write(1, "    (pull-based: polls the hub for due runs, executes with this engine,\n")
+    write(1, "     model calls go through the hub's metered proxy — no local API key)\n")
+    write(1, "  roam status  <host|jobid|last>\n")
+    write(1, "  roam attach  <host|jobid|last>\n")
+    write(1, "  roam steer   <host|jobid|last> <message>\n")
+    write(1, "  roam approve <host|jobid|last>     # allow a parked destructive command\n")
+    write(1, "  roam deny    <host|jobid|last>     # refuse it (agent adapts)\n")
+    write(1, "  roam stop    <host|jobid|last>\n")
+    write(1, "  roam version                       # {tool, version, providers} as JSON\n")
+    write(1, "  roam guide [--human]               # embedded agent guide (JSON by default)\n")
+    write(1, "  roam help-json                     # machine-readable command catalog\n")
 }
 
 func main() {
     a := args()
-    if len(a) < 2 { usage()  exit(64) }
+    if len(a) < 2 { fail(82, "missing_command", "a command is required", "roam help-json") }
     cmd := a[1]
     if cmd == "send"   { cmd_send(a)    return }
     if cmd == "worker" { cmd_rhub_worker(a)  return }
@@ -1525,6 +1591,14 @@ func main() {
         println(tel_status_json())
         return
     }
+    if cmd == "guide" {
+        if has_flag(a, "--human") { println(guide_human()) } else { println(guide_json()) }
+        return
+    }
+    if cmd == "help-json" || cmd == "--help-json" {
+        println(help_json())
+        return
+    }
     if cmd == "version" || cmd == "--version" || cmd == "-v" {
         // A binary you scp onto someone else's box has to be able to say what
         // it is. Without this the only way to check a deployed roam was to
@@ -1534,8 +1608,6 @@ func main() {
             "\",\"providers\":[\"anthropic\",\"openai\",\"debri\"]}")
         return
     }
-    if cmd == "help"   { usage()  return }
-    write(2, "roam: unknown command: " + cmd + "\n")
-    usage()
-    exit(64)
+    if cmd == "help" || cmd == "--help" || cmd == "-h"   { usage()  return }
+    fail(80, "unknown_command", "unknown command: " + cmd, "roam help-json")
 }
