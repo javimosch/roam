@@ -314,6 +314,12 @@ func atoi_json(j, path) (n) {
     if v != "" { n = atoi(v) }
 }
 
+func afloat_json(j, path) (n) {
+    v, _ := json_get(j, path)
+    n = 0.0
+    if v != "" { n = parse_float(v) }
+}
+
 func mkdir_p2(a, b) { mkdir(a)  mkdir(b) }
 
 // safe_path confines a tool path to the job workdir: no absolute paths, no `..`.
@@ -828,10 +834,19 @@ func agent_loop_openai(db, jobid) {
     hdrs := []string{"Authorization: Bearer " + key, "content-type: application/json"}
     if rhub_hdr(db) != "" { hdrs = append(hdrs, rhub_hdr(db)) }
 
+    // OpenRouter (and only OpenRouter — this is not part of OpenAI's own API)
+    // returns the ACTUAL billed cost per request when asked via usage.include,
+    // in .usage.cost (USD). Everywhere else — Anthropic direct, OpenAI direct —
+    // has no such field, so cost_usd stays 0 and callers fall back to their own
+    // token-rate estimate. Requesting it from a non-OpenRouter OpenAI-compatible
+    // endpoint is harmless: an unrecognised field is ignored, not rejected.
+    wantCost := contains(apibase, "openrouter")
+
     journal(db, "system", "agent loop started [openai] (model=" + model + ", maxiter=" + str(maxiter) + ", tokens<=" + str(tokbudget) + ", shell=" + str(allow_shell) + ")")
     msgs := "{\"role\":\"system\",\"content\":" + jstr(AGENT_SYSTEM) + "},{\"role\":\"user\",\"content\":" + jstr(goal) + "}"
     iters := 0
     spent := 0
+    costUsd := 0.0
     done := 0
     for done == 0 {
         sig := agent_drain(db)
@@ -841,13 +856,17 @@ func agent_loop_openai(db, jobid) {
         if iters >= maxiter { journal(db, "budget", "iteration budget reached (" + str(maxiter) + ") — halting")  state_set(db, "status", "halted")  worker_close(db)  return }
         if spent >= tokbudget { journal(db, "budget", "token budget reached (" + str(spent) + "/" + str(tokbudget) + ") — halting")  state_set(db, "status", "halted")  worker_close(db)  return }
 
-        body := "{\"model\":" + jstr(model) + ",\"max_tokens\":16000,\"messages\":[" + msgs + "],\"tools\":" + tools + ",\"tool_choice\":\"auto\"}"
+        body := "{\"model\":" + jstr(model) + ",\"max_tokens\":16000,\"messages\":[" + msgs + "],\"tools\":" + tools + ",\"tool_choice\":\"auto\""
+        if wantCost { body = body + ",\"usage\":{\"include\":true}" }
+        body = body + "}"
         status, resp := http_post_retry(url, hdrs, body)
         if status != 200 { journal(db, "error", "api status " + str(status) + ": " + first_n(resp, 400))  state_set(db, "status", "error")  worker_close(db)  return }
 
         spent = spent + atoi_json(resp, ".usage.prompt_tokens") + atoi_json(resp, ".usage.completion_tokens")
+        costUsd = costUsd + afloat_json(resp, ".usage.cost")
         iters = iters + 1
         state_set(db, "tokens", str(spent))
+        state_set(db, "cost_usd", str(costUsd))
         state_set(db, "iters", str(iters))
 
         // append the assistant message VERBATIM (preserves tool_calls for pairing)
@@ -1150,6 +1169,7 @@ func cmd_status(a) {
     started := state_get(db, "started")
     iters := state_get(db, "iters")
     tokens := state_get(db, "tokens")
+    costUsd := state_get(db, "cost_usd")
     tick := state_get(db, "tick")
     pending := state_get(db, "pending")
     denials := state_get(db, "denials")
@@ -1158,13 +1178,14 @@ func cmd_status(a) {
     sqlite_close(db)
     if iters == "" { iters = "0" }
     if tokens == "" { tokens = "0" }
+    if costUsd == "" { costUsd = "0" }
     if tick == "" { tick = "0" }
     if started == "" { started = "0" }
     if kind == "" { kind = "tick" }
     if denials == "" { denials = "0" }
     if vfails == "" { vfails = "0" }
     // `pending` is the destructive command awaiting approval (status == "awaiting").
-    println("{\"jobid\":" + jstr(jobid) + ",\"status\":" + jstr(status) + ",\"kind\":" + jstr(kind) + ",\"goal\":" + jstr(goal) + ",\"iters\":" + iters + ",\"tokens\":" + tokens + ",\"denials\":" + denials + ",\"verify_fails\":" + vfails + ",\"tick\":" + tick + ",\"started\":" + started + ",\"pending\":" + jstr(pending) + ",\"recent\":" + recent + "}")
+    println("{\"jobid\":" + jstr(jobid) + ",\"status\":" + jstr(status) + ",\"kind\":" + jstr(kind) + ",\"goal\":" + jstr(goal) + ",\"iters\":" + iters + ",\"tokens\":" + tokens + ",\"cost_usd\":" + costUsd + ",\"denials\":" + denials + ",\"verify_fails\":" + vfails + ",\"tick\":" + tick + ",\"started\":" + started + ",\"pending\":" + jstr(pending) + ",\"recent\":" + recent + "}")
 }
 
 func cmd_attach(a) {
