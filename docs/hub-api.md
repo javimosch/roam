@@ -119,6 +119,7 @@ Fields:
 - `trigger_mode` — `ignore` (default) or `inject` (webhook payload injected into prompt)
 - `steps` — JSON step list (for `kind: "script"`)
 - `steps_url` — GitOps step source (fetched fresh at claim time)
+- `selector` — worker routing labels (e.g., `"gpu=true,docker=true"`); empty = any worker
 
 ### GET /v1/agents
 
@@ -201,11 +202,27 @@ These endpoints are used by the `roam worker` process, not by humans directly.
 ### GET /v1/work
 
 Pull the oldest queued run. Returns 204 when idle. Claiming flips
-`queued → running` (atomic, guards against double-claim):
+`queued → running` (atomic, guards against double-claim).
+
+**Worker routing:** workers can pass `?labels=k=v,k=v` and `?name=prod-01`
+as query params. The hub only hands a run whose agent `selector` is
+satisfied by the worker's labels. Empty selector = any worker. Worker
+with no labels = only gets runs with empty selector (backward compatible).
 
 ```bash
+# any worker (backward compatible)
 curl https://hub.roam.intrane.fr/v1/work \
   -H "Authorization: Bearer rhw_..."
+
+# labeled worker — only gets runs whose selector matches
+curl "https://hub.roam.intrane.fr/v1/work?labels=gpu=true,docker=true&name=gpu-box-01" \
+  -H "Authorization: Bearer rhw_..."
+```
+
+From the roam CLI:
+```bash
+roam worker --hub https://hub.roam.intrane.fr --token rhw_... \
+  --label gpu=true --label docker=true --name gpu-box-01
 ```
 
 Response (200):
@@ -221,6 +238,12 @@ Response (200):
   "kind": "agent"
 }
 ```
+
+**Multiple workers:** N workers can poll the same hub with the same `rhw_`
+token. Each gets a different run from the queue (the atomic claim guard
+prevents double-claiming). This is horizontal scaling — more workers =
+more parallel runs. Use `--label` and `--name` to route specific agents
+to specific workers within a single tenant.
 
 ### POST /v1/llm
 
