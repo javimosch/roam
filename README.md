@@ -6,20 +6,24 @@ roam runs autonomous agents on your own servers over SSH — detached, budgeted,
 sandboxed. The moment one reaches for something destructive, it stops and asks.
 Approve or deny from your phone. No Docker, no runtime, no per-seat subscription.
 
-- **92 KB static binary** — no Python, no Node, no deps. `scp` it to any Linux box.
+- **7 MB static binary** — no Python, no Node, no deps. `scp` it to any Linux box.
 - **SSH-native** — agents run on your existing servers. No containers, no sandboxes.
 - **Self-hosted approval panel** — free, MIT licensed. Or use the hosted hub.
 - **Pay per run, not per seat** — €0.01 + token cost × 1.3. No monthly fee.
 - **Multi-provider** — Anthropic, OpenAI (any OpenAI-compatible endpoint), or Devin SWE-1.x.
+- **Worker routing** — route GPU agents to GPU boxes, Docker agents to Docker hosts, all within one tenant.
 
 Built with [machin](https://github.com/javimosch/machin) — one static native binary
 is both the local controller and the remote worker. "Self-replication" is literally
 `scp`-ing the executable.
 
-**Landing page:** [roam.intrane.fr](https://roam.intrane.fr) ·
+**→ Try the hosted hub: [roam.intrane.fr](https://roam.intrane.fr)** — no keys to manage,
+per-run billing, web panel, worker coordination. Join the waitlist for early access.
+
 **Quickstart:** [docs/quickstart.md](docs/quickstart.md) ·
 **Hub API:** [docs/hub-api.md](docs/hub-api.md) ·
-**Panel:** [roam-panel](https://github.com/javimosch/roam-panel)
+**Panel:** [roam-panel](https://github.com/javimosch/roam-panel) ·
+**Releases:** [GitHub Releases](https://github.com/javimosch/roam/releases)
 
 ## Quickstart
 
@@ -88,6 +92,39 @@ The panel is MIT licensed, self-hostable, and supports optional SSO via
 
 For the hosted hub (`hub.roam.intrane.fr`), join the waitlist at
 [roam.intrane.fr](https://roam.intrane.fr). Pay per run, no monthly subscription.
+
+## Hosted hub
+
+Don't want to manage API keys, billing, and worker coordination? The hosted hub
+at [hub.roam.intrane.fr](https://hub.roam.intrane.fr) handles it for you:
+
+- **No model keys** — workers hold no API keys. Every LLM call goes through the
+  hub's metered proxy. You pick the model per agent.
+- **Per-run billing** — €0.01 + token cost × 1.3 per run. A typical coding task
+  costs €0.02–€0.10. Top up your wallet with a card via Stripe. No monthly fee.
+- **Worker routing** — set a `selector` on your agent spec
+  (`"selector":"gpu=true"`) and start workers with matching labels
+  (`roam worker --label gpu=true --name gpu-box-01`). The hub routes runs to
+  the right workers within a single tenant.
+- **Multiple workers** — run N workers on N machines with the same token.
+  Each gets a different run from the queue. Horizontal scaling, one wallet.
+- **Webhook triggers** — `POST /t/<agent_id>/<secret>` to trigger a run from
+  GitHub Actions, cron, or any HTTP source.
+- **Auto-provisioning** — `GET /v1/whoami` with any Bearer token creates a
+  tenant instantly. No email, no signup. `POST /app/claim` to attach an email
+  later.
+
+```bash
+# Start a worker on your server — no API key needed
+roam worker --hub https://hub.roam.intrane.fr --token rhw_... \
+  --label gpu=true --name gpu-box-01
+
+# Trigger a run from anywhere
+curl -X POST https://hub.roam.intrane.fr/t/<agent_id>/<secret>
+```
+
+See [docs/hub-api.md](docs/hub-api.md) for the full API. Join the waitlist at
+[roam.intrane.fr](https://roam.intrane.fr).
 
 ## Providers
 
