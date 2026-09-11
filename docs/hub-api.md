@@ -34,6 +34,45 @@ Response:
 One tenant per email. The `peage_wallet` is a peage wallet token (`pw_...`) for
 billing — see [peage.intrane.fr/llms.txt](https://peage.intrane.fr/llms.txt).
 
+### GET /v1/whoami (cli-trial-spec)
+
+Any Bearer token auto-provisions a tenant — no email, no signup needed.
+The token IS the credential. Generate any token and call whoami:
+
+```bash
+curl https://hub.roam.intrane.fr/v1/whoami \
+  -H "Authorization: Bearer rh_my_random_token_123"
+```
+
+First call (auto-provisions):
+```json
+{"v":"1","tenant_id":"...","email":"","wallet_attached":false,
+ "claimed":false,"plan":"pay_per_run",
+ "worker_token":"rhw_...","auto_provisioned":true}
+```
+
+Subsequent calls (returns existing):
+```json
+{"v":"1","tenant_id":"...","email":"","wallet_attached":false,
+ "claimed":false,"plan":"pay_per_run"}
+```
+
+### POST /app/claim
+
+Attach an email to an existing tenant (recovery + billing):
+
+```bash
+curl -X POST https://hub.roam.intrane.fr/app/claim \
+  -H "Authorization: Bearer rh_my_random_token_123" \
+  -H "Content-Type: application/json" \
+  -d '{"email":"you@example.com"}'
+```
+
+Response:
+```json
+{"v":"1","claimed":true,"email":"you@example.com"}
+```
+
 ### POST /v1/wallet
 
 Set or update your peage wallet:
