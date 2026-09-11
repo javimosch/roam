@@ -3,8 +3,8 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>roam — approve your remote agents from your phone</title>
-<meta name="description" content="Run autonomous agents on your own servers. When one hits something destructive, it parks and asks — approve or deny from your phone.">
+<title>roam — one binary, your servers, your agents</title>
+<meta name="description" content="A single static binary runs autonomous agents on your own servers over SSH. When one hits something destructive, it parks and asks — approve or deny from your phone. No Docker, no runtime, no per-seat subscription.">
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22%3E%3Ctext y=%22.9em%22 font-size=%2290%22%3E%F0%9F%9B%B0%EF%B8%8F%3C/text%3E%3C/svg%3E">
 <script defer src="https://vigie.intrane.fr/vigie.js"></script>
 </head>
@@ -63,6 +63,9 @@
   .hero-copy h1{font-size:clamp(30px,4.6vw,50px);line-height:1.06}
   .hero-copy .lede{color:var(--muted);font-size:18px;margin:22px 0 0;max-width:46ch}
   .hero-copy .lede b{color:var(--ink);font-weight:600}
+  .hero-stats{display:flex;gap:24px;margin-top:26px;flex-wrap:wrap}
+  .hero-stat{font-family:var(--mono);font-size:13px;color:var(--muted)}
+  .hero-stat b{color:var(--ink);font-size:20px;font-weight:700;display:block}
 
   /* the approval scene */
   .scene{position:relative;min-height:340px}
@@ -121,6 +124,19 @@
   .beat code{font-family:var(--mono);font-size:12px;background:var(--surface-2);border:1px solid var(--border);
     padding:2px 6px;border-radius:6px;color:var(--ink)}
 
+  /* comparison table */
+  .compare{display:grid;grid-template-columns:1.4fr 1fr 1fr 1fr;gap:0;border:1px solid var(--border);
+    border-radius:12px;overflow:hidden;font-size:13px}
+  .compare>div{padding:12px 14px;border-bottom:1px solid var(--border);border-right:1px solid var(--border)}
+  .compare>div:nth-child(4n){border-right:0}
+  .compare .hd{font-family:var(--mono);font-weight:700;font-size:12px;background:var(--surface-2);color:var(--ink)}
+  .compare .hd.roam{color:var(--accent)}
+  .compare .lbl{font-family:var(--mono);font-size:12px;color:var(--muted);background:var(--surface-2)}
+  .compare .yes{color:var(--approve);font-weight:600}
+  .compare .no{color:var(--muted);opacity:.6}
+  .compare .maybe{color:var(--accent);font-weight:600}
+  .compare>div:last-child,.compare>div:nth-last-child(2),.compare>div:nth-last-child(3),.compare>div:nth-last-child(4){border-bottom:0}
+
   .ssh{display:grid;grid-template-columns:1fr 1fr;gap:28px;align-items:center}
   .ssh h2{font-size:22px;line-height:1.2}
   .ssh p{color:var(--muted);margin:14px 0 0}
@@ -149,6 +165,10 @@
     .phone{right:8px}
     .beats{grid-template-columns:1fr}
     .ssh{grid-template-columns:1fr}
+    .compare{grid-template-columns:1fr;font-size:12px}
+    .compare>div{border-right:0}
+    .compare .hd{display:none}
+    .compare .lbl{border-bottom:1px solid var(--border);padding-top:8px}
   }
   @media (prefers-reduced-motion:reduce){.pulse,.cursor{animation:none}}
 </style>
@@ -158,16 +178,21 @@
 
     <div class="top">
       <div class="brand"><span class="dot"></span>roam</div>
-      <a class="ghlink" href="https://github.com/javimosch/roam">github.com/javimosch/roam →</a>
+      <a class="ghlink" href="https://github.com/javimosch/roam">github.com/javimosch/roam &rarr;</a>
     </div>
 
     <div class="hero">
       <div class="hero-copy">
-        <p class="eyebrow">Remote agent control · early access</p>
-        <h1>Approve your remote agents<br>from your phone.</h1>
-        <p class="lede">roam runs autonomous agents on <b>your own servers</b> — detached, budgeted,
+        <p class="eyebrow">Remote agent control &middot; early access</p>
+        <h1>One binary.<br>Your servers.<br>Your agents.</h1>
+        <p class="lede">roam runs autonomous agents on <b>your own servers</b> over SSH &mdash; detached, budgeted,
           sandboxed. The moment one reaches for something destructive, it <b>stops and asks</b>.
-          Get the ping, tap approve or deny, from anywhere.</p>
+          Approve or deny from your phone. No Docker, no runtime, no per-seat subscription.</p>
+        <div class="hero-stats">
+          <div class="hero-stat"><b>92&nbsp;KB</b>static binary</div>
+          <div class="hero-stat"><b>0</b>dependencies</div>
+          <div class="hero-stat"><b>MIT</b>open source</div>
+        </div>
         <div style="display:flex;gap:12px;margin-top:30px;flex-wrap:wrap">
           <a class="btn btn-primary" href="#waitlist" data-id="cta-hero-early-access">Get early access</a>
           <a class="btn btn-ghost" href="https://github.com/javimosch/roam" data-id="cta-hero-cli">Try the free CLI</a>
@@ -180,15 +205,15 @@
           <div class="term-body">
             <div class="k">llm: I'll reclaim disk space on the data volume.</div>
             <div>tool: run_shell: du -sh /var/lib/postgresql</div>
-            <div class="ok">tool: read_file: cleanup-plan.md ✓</div>
-            <div class="park"><span class="pulse"></span>AWAITING APPROVAL — rm -rf /var/lib/postgresql/old</div>
-            <div class="k">idle · waiting for operator<span class="cursor"></span></div>
+            <div class="ok">tool: read_file: cleanup-plan.md &check;</div>
+            <div class="park"><span class="pulse"></span>AWAITING APPROVAL &mdash; rm -rf /var/lib/postgresql/old</div>
+            <div class="k">idle &middot; waiting for operator<span class="cursor"></span></div>
           </div>
         </div>
-        <div class="wire">└─ phones home over https ─┐</div>
+        <div class="wire">&boxur;&boxh;&boxh; phones home over https &boxh;&boxam;</div>
         <div class="phone">
           <div class="screen">
-            <div class="push-h"><span class="d"></span>roam · now</div>
+            <div class="push-h"><span class="d"></span>roam &middot; now</div>
             <div class="push-t">Agent on <b>prod-db-01</b> wants to run a destructive command</div>
             <div class="push-s">rm -rf /var/lib/postgresql/old</div>
             <div class="acts">
@@ -204,42 +229,88 @@
       <p class="eyebrow sec-label">How it works</p>
       <div class="beats">
         <div class="beat">
-          <div class="n">01 · dispatch</div>
+          <div class="n">01 &middot; dispatch</div>
           <h3>Send it and walk away</h3>
-          <p><code>roam send --to prod-01 --goal "…"</code> ships the binary to the box and runs the
-            agent detached. One static binary — no Python, no runtime on the server.</p>
+          <p><code>roam send --to prod-01 --goal "&hellip;"</code> ships the binary to the box and runs the
+            agent detached. One static binary &mdash; no Python, no Node, no Docker on the server.</p>
         </div>
         <div class="beat">
-          <div class="n">02 · it parks</div>
+          <div class="n">02 &middot; it parks</div>
           <h3>Nothing destructive runs unasked</h3>
-          <p>Hit <code>rm -rf</code>, <code>git push --force</code>, <code>DROP TABLE</code>, <code>shutdown</code>…
+          <p>Hit <code>rm -rf</code>, <code>git push --force</code>, <code>DROP TABLE</code>, <code>shutdown</code>&hellip;
             and the agent freezes and asks. Budgets and a workdir sandbox bound the rest.</p>
         </div>
         <div class="beat">
-          <div class="n">03 · you decide</div>
+          <div class="n">03 &middot; you decide</div>
           <h3>From anywhere, in one tap</h3>
-          <p>Approve, deny (the agent adapts), or stop. See every agent across every box — live status,
-            token cost, the full journal — in one place.</p>
+          <p>Approve, deny (the agent adapts), or stop. See every agent across every box &mdash; live status,
+            token cost, the full journal &mdash; in one self-hosted panel.</p>
         </div>
+      </div>
+    </section>
+
+    <section>
+      <p class="eyebrow sec-label">Why roam</p>
+      <div class="compare">
+        <div class="hd">&nbsp;</div>
+        <div class="hd roam">roam</div>
+        <div class="hd">SaaS approval tools</div>
+        <div class="hd">Agent platforms</div>
+
+        <div class="lbl">Self-hosted, MIT licensed</div>
+        <div class="yes">Yes &mdash; free binary</div>
+        <div class="no">No &mdash; SaaS subscription</div>
+        <div class="maybe">Some &mdash; but heavy</div>
+
+        <div class="lbl">Single static binary, no runtime</div>
+        <div class="yes">Yes &mdash; 92 KB</div>
+        <div class="no">N/A &mdash; cloud service</div>
+        <div class="no">No &mdash; Docker/K8s</div>
+
+        <div class="lbl">Runs on your existing servers (SSH)</div>
+        <div class="yes">Yes &mdash; SSH native</div>
+        <div class="no">No &mdash; cloud only</div>
+        <div class="maybe">Some &mdash; containers</div>
+
+        <div class="lbl">Phone / email approvals</div>
+        <div class="yes">Yes &mdash; self-hosted</div>
+        <div class="yes">Yes &mdash; $10&ndash;20/mo</div>
+        <div class="no">Rarely</div>
+
+        <div class="lbl">Pricing model</div>
+        <div class="yes">Pay per run (&euro;0.01 + tokens&times;1.3)</div>
+        <div class="no">$10&ndash;99/mo per seat</div>
+        <div class="maybe">Free / enterprise</div>
+
+        <div class="lbl">Bring your own API key</div>
+        <div class="yes">Yes &mdash; or use hub proxy</div>
+        <div class="maybe">Sometimes</div>
+        <div class="yes">Yes</div>
+
+        <div class="lbl">Multi-provider (Anthropic, OpenAI, Devin)</div>
+        <div class="yes">Yes</div>
+        <div class="maybe">Via MCP only</div>
+        <div class="maybe">Varies</div>
       </div>
     </section>
 
     <section>
       <div class="ssh">
         <div>
-          <p class="eyebrow" style="margin-bottom:14px">Why not just ssh?</p>
-          <h2>Because you're not always at your laptop.</h2>
-          <p>The free CLI already lets you approve over ssh. But the agent parks at 2am, or you're on
-            café wifi that can't reach the box. The hosted layer is the agent <b>phoning home</b> —
-            so the decision comes to you, wherever you are.</p>
+          <p class="eyebrow" style="margin-bottom:14px">Self-host or hosted</p>
+          <h2>The CLI is free. The panel is yours.</h2>
+          <p>Self-host the approval panel &mdash; it's the same binary, MIT licensed, zero config.
+            Or use the hosted hub: agents phone home, you approve from anywhere, and you only pay
+            for runs that actually execute. No monthly seat, no vendor lock-in.</p>
         </div>
         <div class="aside">
           <b>What early access gets you</b><br><br>
-          → push / email / WhatsApp when an agent parks<br>
-          → approve &amp; deny from the web or a tap<br>
-          → fleet view across all your servers<br>
-          → aggregated token cost + audit trail<br>
-          → scheduled dispatches
+          &rarr; push / email when an agent parks<br>
+          &rarr; approve &amp; deny from the web or a tap<br>
+          &rarr; fleet view across all your servers<br>
+          &rarr; per-run metering (tokens, cost, audit trail)<br>
+          &rarr; scheduled dispatches &mdash; agents on cron<br>
+          &rarr; SSO login (Portier / your own IdP)
         </div>
       </div>
     </section>
@@ -248,20 +319,20 @@
       <div class="cta-card">
         <p class="eyebrow" style="margin-bottom:14px">Early access</p>
         <h2>Leave agents running. Sleep fine.</h2>
-        <p>The roam CLI is free and open source today. Join the waitlist for the hosted panel —
-          notify, approve from anywhere, and fleet view.</p>
+        <p>The roam CLI is free and open source today. Join the waitlist for the hosted panel &mdash;
+          approve from anywhere, fleet view, per-run billing. No monthly subscription.</p>
         <form onsubmit="event.preventDefault();var e=this.querySelector('input').value;try{window.vigie&&vigie('waitlist_signup',{email:e});}catch(_){}this.style.display='none';document.getElementById('thx').style.display='block';">
           <input type="email" required placeholder="you@company.com" aria-label="email">
           <button class="btn btn-primary" type="submit" data-id="cta-waitlist-submit">Get early access</button>
         </form>
-        <p class="thanks" id="thx">✓ You're on the list — we'll be in touch.</p>
-        <p class="fine"><b>Bring your own key</b> (Claude or any OpenAI-compatible model) and <b>your own servers</b>. ~€19/mo at launch.</p>
+        <p class="thanks" id="thx">&check; You're on the list &mdash; we'll be in touch.</p>
+        <p class="fine"><b>Self-host free</b> (MIT, bring your own key) &middot; <b>Hosted:</b> &euro;0.01 + token cost &times; 1.3 per run &middot; <b>No monthly fee</b></p>
       </div>
     </section>
 
     <footer>
-      <span>roam — leave a working agent on a remote box.</span>
-      <span><a href="https://github.com/javimosch/roam" style="color:var(--accent);text-decoration:none">open source →</a></span>
+      <span>roam &mdash; leave a working agent on a remote box.</span>
+      <span><a href="https://github.com/javimosch/roam" style="color:var(--accent);text-decoration:none">open source &rarr;</a></span>
     </footer>
 
   </div>
