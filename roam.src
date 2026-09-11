@@ -130,6 +130,19 @@ func has_flag(a, name) (b) {
     for i < len(a) { if a[i] == name { b = true }  i = i + 1 }
 }
 
+// collect_labels — gather all --label key=value flags into a comma-separated string.
+func collect_labels(a) (out) {
+    out = ""
+    i := 0
+    for i < len(a) {
+        if a[i] == "--label" && i + 1 < len(a) {
+            if out != "" { out = out + "," }
+            out = out + a[i + 1]
+        }
+        i = i + 1
+    }
+}
+
 func roam_home() (p) {
     p = env("HOME") + "/.roam"
     mkdir(p)
@@ -1451,11 +1464,26 @@ func cmd_rhub_worker(a) {
     poll := atoi(flag(a, "--poll-secs", "20"))
     if poll < 1 { poll = 20 }
     once := has_flag(a, "--once")
-    write(2, "roam worker: polling " + hub + "/v1/work every " + str(poll) + "s\n")
+    // worker routing: --label key=value (repeatable) and --name <worker-name>
+    // passed as query params on GET /v1/work so the hub can match agent selectors
+    wname := flag(a, "--name", "")
+    labels := collect_labels(a)
+    work_url := hub + "/v1/work"
+    qs := ""
+    if labels != "" { qs = "?labels=" + labels }
+    if wname != "" {
+        if qs != "" { qs = qs + "&name=" + wname } else { qs = "?name=" + wname }
+    }
+    if qs != "" { work_url = work_url + qs }
+    if labels != "" {
+        write(2, "roam worker: polling " + work_url + " every " + str(poll) + "s (labels: " + labels + ")\n")
+    } else {
+        write(2, "roam worker: polling " + work_url + " every " + str(poll) + "s\n")
+    }
     hdrs := []string{"authorization: Bearer " + token}
     done := 0
     for done == 0 {
-        st, resp, herr := http_request("GET", hub + "/v1/work", hdrs, "")
+        st, resp, herr := http_request("GET", work_url, hdrs, "")
         if herr != "" {
             write(2, "roam worker: hub unreachable (" + herr + "), retrying\n")
             sleep(poll * 1000)
@@ -1506,7 +1534,7 @@ func guide_json() (g) {
     g = g + "\"model\":{\"split\":\"controller dispatches and controls; the same binary becomes a detached worker on the target\",\"storage\":\"each job stores state, journal, and mailbox in ~/.roam/<jobid>.db\",\"providers\":\"anthropic and OpenAI-compatible tool loops, plus debri/Devin delegation\",\"control\":\"status, attach, steer, pause, resume, approve, deny, and stop operate through the local or remote journal\"},"
     g = g + "\"loop\":[\"run roam help-json and roam guide before driving an unfamiliar binary\",\"dispatch with roam send --local or roam send --to <host> --goal <text>\",\"the controller creates the job and the detached worker journals progress\",\"inspect with roam status <host|jobid|last> or roam attach <host|jobid|last>\",\"steer or stop at checkpoints; approve or deny parked destructive work when --confirm is enabled\",\"the worker reaches done, halted, stopped, or error and reports the final journal\"],"
     g = g + "\"concepts\":{\"job\":\"a SQLite-backed run identified by a short job id\",\"target\":\"last, a local job id, or a remote host handle in ~/.roam/hosts\",\"journal\":\"append-only audit trail containing model turns, tool calls, controls, and budgets\",\"mailbox\":\"out-of-band control channel consumed at safe worker checkpoints\",\"confirm_gate\":\"--confirm parks destructive shell commands until approve, deny, or stop arrives\",\"budgets\":\"--max-iters and --tokens halt a run before it can exceed its configured limits\",\"telemetry\":\"anonymous usage reporting is opt-in; telemetry is disabled until explicitly enabled\"},"
-    g = g + "\"commands\":{\"dispatch\":[\"roam send --local [flags] --goal <text>\",\"roam send --to <host> [flags] --goal <text>\",\"roam worker --hub <url> --token <token>\"],\"observe\":[\"roam status <host|jobid|last>\",\"roam attach <host|jobid|last>\"],\"control\":[\"roam steer <host|jobid|last> <message>\",\"roam pause|resume|stop <host|jobid|last>\",\"roam approve|deny <host|jobid|last>\"],\"introspection\":[\"roam guide [--human]\",\"roam help-json\",\"roam version\",\"roam telemetry\"],\"lifecycle\":[\"roam update [--check] [--force]\",\"roam install [--path <dir>]\",\"roam feedback \\\"<message>\\\" [--kind bug|idea|praise]\"]},"
+    g = g + "\"commands\":{\"dispatch\":[\"roam send --local [flags] --goal <text>\",\"roam send --to <host> [flags] --goal <text>\",\"roam worker --hub <url> --token <token> [--label k=v] [--name <name>]\"],\"observe\":[\"roam status <host|jobid|last>\",\"roam attach <host|jobid|last>\"],\"control\":[\"roam steer <host|jobid|last> <message>\",\"roam pause|resume|stop <host|jobid|last>\",\"roam approve|deny <host|jobid|last>\"],\"introspection\":[\"roam guide [--human]\",\"roam help-json\",\"roam version\",\"roam telemetry\"],\"lifecycle\":[\"roam update [--check] [--force]\",\"roam install [--path <dir>]\",\"roam feedback \\\"<message>\\\" [--kind bug|idea|praise]\"]},"
     g = g + "\"examples\":[{\"goal\":\"prove the local controller/worker loop\",\"do\":[\"roam send --local --tick --every 1 --goal demo\",\"roam status last\",\"roam stop last\"]},{\"goal\":\"run an unattended remote agent with a safety gate\",\"do\":[\"export ANTHROPIC_API_KEY=sk-ant-...\",\"roam send --to host --allow-shell --confirm --goal clone repo X and run its tests\",\"roam status host\",\"roam approve host\"]}],"
     g = g + "\"gotchas\":[\"stdout is JSON data for one-shot controller commands; stderr carries attach/worker context\",\"the goal follows --goal and consumes the remaining arguments, so --goal must be last\",\"--allow-shell is required for run_shell and --confirm is required to park destructive commands\",\"remote dispatch copies the exact binary to ~/.roam/roam and needs SSH plus scp\",\"status and control of a missing local job fail with a typed semantic error instead of creating a database\",\"telemetry is opt-in; use DO_NOT_TRACK=1 or the telemetry command to keep it disabled\"],"
     g = g + "\"version\":\"" + roam_version() + "\",\"see_also\":[\"roam help-json\",\"roam version\",\"roam telemetry\"]}"
@@ -1517,7 +1545,7 @@ func guide_human() (h) {
     h = h + "roam ships one native binary to a local or remote machine, runs a tick or LLM-backed agent loop, and exposes JSON control/status commands.\n\n"
     h = h + "## The model\n\n- The controller dispatches and controls. The same binary becomes a detached worker.\n- Each job stores state, an append-only journal, and a mailbox in `~/.roam/<jobid>.db`.\n- Targets are `last`, a local job id, or a remote host handle.\n\n"
     h = h + "## The loop\n\n1. `roam help-json` and `roam guide` discover the binary.\n2. `roam send --local` or `roam send --to <host>` creates a job.\n3. `roam status` / `roam attach` observe it.\n4. `roam steer`, `pause`, `resume`, `approve`, `deny`, and `stop` control it at checkpoints.\n5. The worker ends in `done`, `halted`, `stopped`, or `error`.\n\n"
-    h = h + "## Commands\n\n- `roam send --local [flags] --goal <text>` — start locally\n- `roam send --to <host> [flags] --goal <text>` — copy and start remotely\n- `roam status <host|jobid|last>` — JSON snapshot\n- `roam attach <host|jobid|last>` — stream the journal\n- `roam steer <target> <message>` — add an operator note\n- `roam pause|resume|stop <target>` — control the worker\n- `roam approve|deny <target>` — answer a confirm gate\n- `roam telemetry` — inspect the opt-in telemetry state\n- `roam update [--check] [--force]` — self-update from GitHub Releases\n- `roam install [--path <dir>]` — install to ~/.local/bin\n- `roam feedback \"<message>\"` — send feedback to the relay\n\n"
+    h = h + "## Commands\n\n- `roam send --local [flags] --goal <text>` — start locally\n- `roam send --to <host> [flags] --goal <text>` — copy and start remotely\n- `roam worker --hub <url> --token <token> [--label k=v] [--name <name>]` — hosted worker (labels route to matching agents)\n- `roam status <host|jobid|last>` — JSON snapshot\n- `roam attach <host|jobid|last>` — stream the journal\n- `roam steer <target> <message>` — add an operator note\n- `roam pause|resume|stop <target>` — control the worker\n- `roam approve|deny <target>` — answer a confirm gate\n- `roam telemetry` — inspect the opt-in telemetry state\n- `roam update [--check] [--force]` — self-update from GitHub Releases\n- `roam install [--path <dir>]` — install to ~/.local/bin\n- `roam feedback \"<message>\"` — send feedback to the relay\n\n"
     h = h + "## Gotchas\n\n- `--goal` consumes the remaining arguments and must be last.\n- `--allow-shell` enables shell tools; `--confirm` gates destructive shell commands.\n- Remote dispatch needs SSH and scp.\n- stdout is JSON data for one-shot controller commands; stderr is context.\n- Telemetry is opt-in.\n\nVersion: " + roam_version() + "\n"
 }
 
