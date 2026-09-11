@@ -166,6 +166,18 @@
   .calc-result .breakdown{font-family:var(--mono);font-size:11px;color:var(--muted);margin-top:14px;
     padding-top:14px;border-top:1px solid var(--border);line-height:1.7}
   .calc-result .vs{font-family:var(--mono);font-size:11px;color:var(--approve);margin-top:12px;font-weight:600}
+  /* social proof */
+  .proof{display:grid;grid-template-columns:1fr 1fr;gap:20px}
+  .proof-card{background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:22px}
+  .proof-card .tag{font-family:var(--mono);font-size:11px;color:var(--approve);font-weight:600;
+    text-transform:uppercase;letter-spacing:.08em;margin-bottom:10px}
+  .proof-card h3{font-size:15px;margin:0 0 8px}
+  .proof-card p{margin:0;color:var(--muted);font-size:13px;line-height:1.55}
+  .proof-card a{color:var(--accent);text-decoration:none;font-weight:600}
+  .proof-card a:hover{text-decoration:underline}
+  .proof-card .stat{font-family:var(--mono);font-size:11px;color:var(--muted);margin-top:12px;
+    padding-top:12px;border-top:1px solid var(--border)}
+  .proof-card .stat b{color:var(--ink)}
   .cta-card{background:var(--surface);border:1px solid var(--border);border-radius:16px;padding:36px 32px;text-align:center}
   .cta-card h2{font-size:24px}
   .cta-card p{color:var(--muted);max-width:52ch;margin:14px auto 0}
@@ -187,6 +199,7 @@
     .beats{grid-template-columns:1fr}
     .ssh{grid-template-columns:1fr}
     .calc-grid{grid-template-columns:1fr;gap:24px}
+    .proof{grid-template-columns:1fr}
     .compare{grid-template-columns:1fr;font-size:12px}
     .compare>div{border-right:0}
     .compare .hd{display:none}
@@ -313,6 +326,29 @@
         <div class="yes">Yes</div>
         <div class="maybe">Via MCP only</div>
         <div class="maybe">Varies</div>
+      </div>
+    </section>
+
+    <section>
+      <p class="eyebrow sec-label">Proven end-to-end</p>
+      <div class="proof">
+        <div class="proof-card">
+          <div class="tag">&#10003; merged PR</div>
+          <h3>Agent filed a real PR on GitHub</h3>
+          <p>A roam agent was dispatched with the goal <em>"add a unit test to the machin repo
+            and open a PR."</em> It cloned the repo, wrote a passing Go test, parked on
+            <code>git push</code> for out-of-band approval, and filed a PR that was reviewed and
+            <a href="https://github.com/javimosch/machin/pull/433">merged</a>.</p>
+          <div class="stat"><b>machin#433</b> &middot; one static binary, no Python on the target</div>
+        </div>
+        <div class="proof-card">
+          <div class="tag">&#10003; live test</div>
+          <h3>Dispatch &rarr; park &rarr; approve from browser</h3>
+          <p>A debri agent was dispatched locally with <code>--confirm</code>. It parked in the
+            panel for approval. The operator clicked <b>Approve</b> from the web UI. The agent
+            started a Devin session, created <code>/tmp/roam-test.txt</code>, and finished.</p>
+          <div class="stat"><b>Full stack verified</b> &middot; roam &rarr; panel &rarr; portier SSO &rarr; debri/devin</div>
+        </div>
       </div>
     </section>
 
