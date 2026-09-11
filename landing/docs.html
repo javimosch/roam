@@ -1,0 +1,218 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>roam — docs</title>
+<meta name="description" content="roam documentation: quickstart, hub API, worker routing, self-hosting.">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22%3E%3Ctext y=%22.9em%22 font-size=%2290%22%3E%F0%9F%9B%B0%EF%B8%8F%3C/text%3E%3C/svg%3E">
+<style>
+  :root {
+    --bg:#f5f7f9; --surface:#ffffff; --surface-2:#eef1f4;
+    --ink:#12161b; --muted:#5b636d; --border:rgba(12,20,30,.12);
+    --accent:#a35b00; --accent-bright:#f5a524; --accent-soft:rgba(245,165,36,.14);
+    --approve:#0f9d63; --deny:#c8443b;
+    --mono:ui-monospace,"SF Mono","JetBrains Mono",Menlo,Consolas,monospace;
+    --sans:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+  }
+  @media (prefers-color-scheme:dark){
+    :root{
+      --bg:#0b0d10; --surface:#14171c; --surface-2:#1b1f26;
+      --ink:#e9ebee; --muted:#8b929b; --border:rgba(255,255,255,.09);
+      --accent:#f5a524; --accent-bright:#f5a524; --accent-soft:rgba(245,165,36,.13);
+      --approve:#34d399; --deny:#f87171;
+    }
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--sans);
+    -webkit-font-smoothing:antialiased;line-height:1.6}
+  a{color:var(--accent-bright);text-decoration:none}
+  a:hover{text-decoration:underline}
+  code,pre{font-family:var(--mono);font-size:13px}
+  code{background:var(--surface-2);padding:1px 5px;border-radius:4px}
+  pre{background:var(--surface);border:1px solid var(--border);border-radius:10px;
+    padding:16px 18px;overflow-x:auto;line-height:1.5}
+  pre code{background:none;padding:0}
+  .container{max-width:780px;margin:0 auto;padding:0 24px}
+  .top{display:flex;align-items:center;justify-content:space-between;padding:22px 0;
+    border-bottom:1px solid var(--border);margin-bottom:40px}
+  .brand{display:flex;align-items:center;gap:10px;font-family:var(--mono);
+    font-weight:700;font-size:18px;color:var(--ink);text-decoration:none}
+  .brand .dot{width:9px;height:9px;border-radius:50%;background:var(--accent-bright);
+    box-shadow:0 0 0 4px var(--accent-soft)}
+  .top .nav{display:flex;gap:20px;align-items:center}
+  .top .nav a{font-family:var(--mono);font-size:13px;color:var(--muted)}
+  .top .nav a:hover{color:var(--ink);text-decoration:none}
+  h1{font-family:var(--mono);font-size:32px;font-weight:700;letter-spacing:-.02em;margin:0 0 8px}
+  h2{font-family:var(--mono);font-size:22px;font-weight:700;letter-spacing:-.02em;
+    margin:48px 0 16px;padding-top:8px;border-top:1px solid var(--border)}
+  h3{font-family:var(--mono);font-size:16px;font-weight:600;margin:28px 0 10px}
+  p{margin:0 0 14px}
+  ul{margin:0 0 14px;padding-left:22px}
+  li{margin-bottom:6px}
+  .lead{font-size:17px;color:var(--muted);margin-bottom:32px}
+  .card{background:var(--surface);border:1px solid var(--border);border-radius:12px;
+    padding:20px 22px;margin:16px 0}
+  .card h3{margin-top:0}
+  .tag{font-family:var(--mono);font-size:11px;color:var(--accent);font-weight:600;
+    text-transform:uppercase;letter-spacing:.1em;margin-bottom:8px}
+  .grid{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin:20px 0}
+  @media(max-width:640px){.grid{grid-template-columns:1fr}}
+  footer{padding:40px 0;border-top:1px solid var(--border);color:var(--muted);
+    font-size:13px;margin-top:60px}
+  footer a{color:var(--muted)}
+  footer a:hover{color:var(--ink)}
+</style>
+</head>
+<body>
+<div class="container">
+
+  <div class="top">
+    <a class="brand" href="/"><span class="dot"></span>roam</a>
+    <div class="nav">
+      <a href="/">home</a>
+      <a href="https://github.com/javimosch/roam">github &rarr;</a>
+    </div>
+  </div>
+
+  <h1>Docs</h1>
+  <p class="lead">Everything you need to run roam — self-hosted or hosted.</p>
+
+  <h2>Quickstart</h2>
+  <p>Grab the binary and run your first agent in 60 seconds:</p>
+  <pre><code>curl -fsSL https://github.com/javimosch/roam/releases/latest/download/roam-x86_64-linux -o roam
+chmod +x roam
+export ANTHROPIC_API_KEY="sk-ant-..."
+
+./roam send --local --provider anthropic --allow-shell --confirm \
+  --goal "list files in this directory and summarize the project"
+
+./roam status last     <code style="color:var(--muted)"># JSON snapshot</code>
+./roam attach last     <code style="color:var(--muted)"># stream the journal live</code></code></pre>
+
+  <p>For remote dispatch over SSH:</p>
+  <pre><code>./roam send --to my-vm --provider anthropic --allow-shell --confirm \
+  --goal "check disk usage and clean up logs older than 30 days"
+./roam attach my-vm
+./roam approve my-vm    <code style="color:var(--muted)"># let the parked rm proceed</code>
+./roam stop my-vm       <code style="color:var(--muted)"># cancel the agent</code></code></pre>
+
+  <h2>How it works</h2>
+  <ol>
+    <li><code>roam send --local</code> or <code>roam send --to &lt;host&gt;</code> creates a job.</li>
+    <li>The agent runs a tool loop: <code>read_file</code>, <code>write_file</code>, <code>run_shell</code> (gated by <code>--allow-shell</code>), <code>finish</code>.</li>
+    <li>Destructive commands (<code>rm</code>, <code>git push --force</code>, <code>DROP TABLE</code>&hellip;) park for approval.</li>
+    <li>You approve, deny, steer, or stop &mdash; from the terminal, the web panel, or a phone tap.</li>
+    <li>The worker ends in <code>done</code>, <code>halted</code>, <code>stopped</code>, or <code>error</code>.</li>
+  </ol>
+
+  <h2>Providers</h2>
+  <ul>
+    <li><code>--provider anthropic</code> (default) &mdash; Anthropic Messages API. Key from <code>ANTHROPIC_API_KEY</code> or <code>ROAM_API_KEY</code>.</li>
+    <li><code>--provider openai</code> &mdash; any OpenAI-compatible endpoint (OpenRouter, etc.) via <code>--api-base</code>.</li>
+    <li><code>--provider debri</code> &mdash; delegates to the <a href="https://devin.ai">devin</a> CLI (SWE-1.x models) via <a href="https://github.com/javimosch/debri">debri</a>. Subscription-based, no per-token cost.</li>
+  </ul>
+
+  <h2>Hosted hub</h2>
+  <p>The hosted hub at <a href="/">roam.intrane.fr</a> handles API keys, billing, and worker coordination. Workers hold no model keys &mdash; every LLM call goes through the hub's metered proxy.</p>
+
+  <h3>Start a worker</h3>
+  <pre><code>roam worker --hub https://hub.roam.intrane.fr --token rhw_... \
+  --label gpu=true --name gpu-box-01</code></pre>
+
+  <h3>Trigger a run</h3>
+  <pre><code>curl -X POST https://hub.roam.intrane.fr/t/&lt;agent_id&gt;/&lt;secret&gt; \
+  -H "content-type: application/json" -d '{}'</code></pre>
+
+  <h3>Auto-provision a tenant</h3>
+  <pre><code><code style="color:var(--muted)"># any bearer token auto-creates a tenant — no signup needed</code>
+curl https://hub.roam.intrane.fr/v1/whoami \
+  -H "authorization: Bearer my-random-token"
+
+<code style="color:var(--muted)"># attach an email for recovery + billing</code>
+curl -X POST https://hub.roam.intrane.fr/app/claim \
+  -H "authorization: Bearer my-random-token" \
+  -H "content-type: application/json" \
+  -d '{"email":"you@company.com"}'</code></pre>
+
+  <h2>Worker routing</h2>
+  <p>Route specific agents to specific workers within a single tenant using selectors and labels.</p>
+
+  <div class="grid">
+    <div class="card">
+      <div class="tag">Agent spec</div>
+      <h3>Selector</h3>
+      <p>Set a <code>selector</code> on the agent: comma-separated <code>key=value</code> pairs. Empty = any worker.</p>
+      <pre><code>"selector": "gpu=true,docker=true"</code></pre>
+    </div>
+    <div class="card">
+      <div class="tag">Worker CLI</div>
+      <h3>Labels + name</h3>
+      <p>Start the worker with matching labels and a name. The hub only hands runs whose selector is satisfied.</p>
+      <pre><code>roam worker --hub ... --token ... \
+  --label gpu=true \
+  --label docker=true \
+  --name gpu-box-01</code></pre>
+    </div>
+  </div>
+
+  <h3>Matching rules</h3>
+  <ul>
+    <li>Empty selector = any worker (backward compatible)</li>
+    <li>Worker with no labels = only gets runs with empty selector (backward compatible)</li>
+    <li>All key=value pairs in the selector must be present in the worker's labels</li>
+    <li>The <code>claimed</code> journal event includes the worker name when provided</li>
+  </ul>
+
+  <h3>Multiple workers</h3>
+  <p>N workers can poll the same hub with the same <code>rhw_</code> token. Each gets a different run from the queue &mdash; the hub's atomic claim guard prevents double-claiming. This is horizontal scaling: more workers = more parallel runs, all billed through one peage wallet.</p>
+
+  <h2>Billing</h2>
+  <div class="card">
+    <div class="tag">Per-run pricing</div>
+    <p><b>€0.01 flat + token_cost × 1.3</b> per run. No monthly fee. A typical coding task costs €0.02–€0.10.</p>
+    <p>The hub proxies every LLM call, meters exact tokens from the upstream response, and charges your peage wallet. Top up with a card via Stripe. Self-hosting is free &mdash; bring your own API key.</p>
+  </div>
+
+  <h2>Trust layer</h2>
+  <ul>
+    <li><b>Hard budgets</b> &mdash; <code>--max-iters</code> and <code>--tokens</code> freeze the run (<code>status: halted</code>) when hit.</li>
+    <li><b>Confirm-gate</b> &mdash; <code>--confirm</code> parks destructive commands for async approval.</li>
+    <li><b>Deny budget</b> &mdash; <code>--max-denials</code> (default 3) auto-halts an agent that keeps re-parking.</li>
+    <li><b>Goal-verify</b> &mdash; <code>--verify</code> sends <code>finish</code> to an independent judge that checks evidence.</li>
+    <li><b>Workdir sandbox</b> &mdash; file tools confined to <code>~/.roam/work/&lt;jobid&gt;/</code>; <code>..</code> and absolute paths refused.</li>
+    <li><b>Append-only journal</b> &mdash; every model turn, tool call, result, and token cost recorded.</li>
+  </ul>
+
+  <h2>Worker failure handling</h2>
+  <p>If a run has no worker activity for 15 minutes, the hub puts it back in the queue for another worker to pick up. After one reclaim attempt, the run is declared <code>lost</code> and billed only for what it actually metered. Your webhook (if set) receives the loss event.</p>
+
+  <h2>Self-hosting</h2>
+  <p>The CLI is MIT-licensed. The approval panel is <a href="https://github.com/javimosch/roam-panel">roam-panel</a> &mdash; self-hostable with optional SSO via <a href="https://github.com/javimosch/portier">Portier</a>. Bring your own Anthropic/OpenAI key, run workers on your own machines, approve from the panel or your terminal.</p>
+
+  <h2>Agent-first CLI</h2>
+  <pre><code>roam guide              <code style="color:var(--muted)"># structured JSON: model, loop, concepts, examples</code>
+roam guide --human      <code style="color:var(--muted)"># readable Markdown</code>
+roam help-json          <code style="color:var(--muted)"># machine-readable commands, flags, exits</code>
+roam version            <code style="color:var(--muted)"># version info</code>
+roam telemetry          <code style="color:var(--muted)"># inspect opt-in telemetry state</code>
+roam update --check     <code style="color:var(--muted)"># check for updates</code>
+roam feedback "..."     <code style="color:var(--muted)"># send feedback</code></code></pre>
+  <p>Controller errors use typed JSON on stderr and semantic exits: <code>80-89</code> for invalid input, <code>90-99</code> for missing resources or auth, <code>100-109</code> for remote/external failures.</p>
+
+  <h2>Telemetry</h2>
+  <p>roam reports <b>nothing</b> unless you run <code>roam telemetry --telemetry-on</code>. A fresh install makes zero outbound connections beyond the work you asked it to do. If enabled, it sends version, os/arch, which verb ran and whether it failed &mdash; never prompts, keys, output, hostnames or paths.</p>
+
+  <h2>Hub API reference</h2>
+  <p>For the full hub API (agents, runs, webhooks, LLM proxy, whoami, claim), see <a href="https://github.com/javimosch/roam/blob/main/docs/hub-api.md">docs/hub-api.md</a> on GitHub.</p>
+
+  <footer>
+    <span>roam &mdash; leave a working agent on a remote box.</span> &middot;
+    <a href="/">home</a> &middot;
+    <a href="https://github.com/javimosch/roam">github</a> &middot;
+    <a href="https://github.com/javimosch/roam/releases">releases</a>
+  </footer>
+
+</div>
+</body>
+</html>
