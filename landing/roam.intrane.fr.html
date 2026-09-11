@@ -145,6 +145,27 @@
   .ssh .aside b{color:var(--ink);font-weight:600}
 
   /* waitlist */
+  .calc{background:var(--surface);border:1px solid var(--border);border-radius:16px;padding:32px}
+  .calc-grid{display:grid;grid-template-columns:1fr 1fr;gap:32px;align-items:start}
+  .calc-controls{display:flex;flex-direction:column;gap:22px}
+  .calc-label{font-family:var(--mono);font-size:12px;color:var(--muted);margin-bottom:8px;display:flex;justify-content:space-between}
+  .calc-label b{color:var(--ink);font-weight:600}
+  .calc-models{display:grid;grid-template-columns:repeat(3,1fr);gap:8px}
+  .calc-models button{font-family:var(--mono);font-size:12px;font-weight:600;border:1px solid var(--border);
+    border-radius:9px;padding:10px 6px;cursor:pointer;background:var(--bg);color:var(--muted);transition:all .15s}
+  .calc-models button.active{border-color:var(--accent);background:var(--accent-soft);color:var(--accent)}
+  .calc-models button small{display:block;font-size:10px;font-weight:400;opacity:.7;margin-top:2px}
+  .calc input[type=range]{width:100%;accent-color:var(--accent-bright);height:4px}
+  .calc input[type=number]{font-family:var(--mono);font-size:14px;color:var(--ink);background:var(--bg);
+    border:1px solid var(--border);border-radius:9px;padding:8px 12px;width:100%}
+  .calc-result{background:var(--surface-2);border:1px solid var(--border);border-radius:12px;padding:24px}
+  .calc-result .per-run{font-family:var(--mono);font-size:32px;font-weight:700;color:var(--accent);letter-spacing:-.02em}
+  .calc-result .per-run small{font-size:14px;color:var(--muted);font-weight:400}
+  .calc-result .per-month{font-family:var(--mono);font-size:16px;color:var(--ink);margin-top:10px}
+  .calc-result .per-month b{font-weight:700}
+  .calc-result .breakdown{font-family:var(--mono);font-size:11px;color:var(--muted);margin-top:14px;
+    padding-top:14px;border-top:1px solid var(--border);line-height:1.7}
+  .calc-result .vs{font-family:var(--mono);font-size:11px;color:var(--approve);margin-top:12px;font-weight:600}
   .cta-card{background:var(--surface);border:1px solid var(--border);border-radius:16px;padding:36px 32px;text-align:center}
   .cta-card h2{font-size:24px}
   .cta-card p{color:var(--muted);max-width:52ch;margin:14px auto 0}
@@ -165,6 +186,7 @@
     .phone{right:8px}
     .beats{grid-template-columns:1fr}
     .ssh{grid-template-columns:1fr}
+    .calc-grid{grid-template-columns:1fr;gap:24px}
     .compare{grid-template-columns:1fr;font-size:12px}
     .compare>div{border-right:0}
     .compare .hd{display:none}
@@ -315,6 +337,43 @@
       </div>
     </section>
 
+    <section>
+      <p class="eyebrow sec-label">Cost calculator</p>
+      <h2 style="font-size:22px;margin-bottom:6px">Estimate your spend</h2>
+      <p style="color:var(--muted);font-size:14px;margin:0 0 24px">Pay per run. No monthly fee. Self-host the CLI free.</p>
+      <div class="calc">
+        <div class="calc-grid">
+          <div class="calc-controls">
+            <div>
+              <div class="calc-label"><span>Model tier</span></div>
+              <div class="calc-models" id="calc-models">
+                <button data-cost="0.3" class="active">Light<small>GPT-4o-mini &middot; &euro;0.30/M</small></button>
+                <button data-cost="6">Standard<small>Claude Sonnet &middot; &euro;6/M</small></button>
+                <button data-cost="30">Heavy<small>Claude Opus &middot; &euro;30/M</small></button>
+              </div>
+            </div>
+            <div>
+              <div class="calc-label"><span>Tokens per run</span><b id="calc-tok-lbl">100K</b></div>
+              <input type="range" id="calc-tok" min="10000" max="500000" step="10000" value="100000">
+            </div>
+            <div>
+              <div class="calc-label"><span>Runs per month</span></div>
+              <input type="number" id="calc-runs" value="50" min="1" max="10000" style="max-width:120px">
+            </div>
+          </div>
+          <div class="calc-result">
+            <div class="per-run" id="calc-per-run">&euro;0.79<small> / run</small></div>
+            <div class="per-month" id="calc-per-month"><b>&euro;39.50</b> / month</div>
+            <div class="breakdown" id="calc-breakdown">
+              &euro;0.01 flat + 100K tokens &times; &euro;6.00/M &times; 1.3 = &euro;0.78<br>
+              50 runs &times; &euro;0.79 = &euro;39.50/month
+            </div>
+            <div class="vs" id="calc-vs">vs Pushary $99/mo per seat &mdash; you'd save ~67%</div>
+          </div>
+        </div>
+      </div>
+    </section>
+
     <section id="waitlist">
       <div class="cta-card">
         <p class="eyebrow" style="margin-bottom:14px">Early access</p>
@@ -342,6 +401,46 @@
     document.querySelectorAll('[data-id]').forEach(function(el){
       el.addEventListener('click', function(){ try { window.vigie && vigie('cta_click', { id: el.getAttribute('data-id') }); } catch(e){} });
     });
+    (function(){
+      var cost=0.3,tok=100000,runs=50;
+      var models=document.getElementById('calc-models');
+      var tokEl=document.getElementById('calc-tok');
+      var tokLbl=document.getElementById('calc-tok-lbl');
+      var runsEl=document.getElementById('calc-runs');
+      var perRun=document.getElementById('calc-per-run');
+      var perMonth=document.getElementById('calc-per-month');
+      var breakdown=document.getElementById('calc-breakdown');
+      var vs=document.getElementById('calc-vs');
+      var modelNames={'0.3':'GPT-4o-mini','6':'Claude Sonnet','30':'Claude Opus'};
+      function fmt(n){return n.toFixed(2).replace('.00','.00');}
+      function calc(){
+        var tokenCost=tok*cost/1000000*1.3;
+        var perRunCost=0.01+tokenCost;
+        var monthCost=perRunCost*runs;
+        var tokK=tok>=1000000?(tok/1000000).toFixed(1)+'M':(tok/1000)+'K';
+        perRun.innerHTML='&euro;'+perRunCost.toFixed(2)+'<small> / run</small>';
+        perMonth.innerHTML='<b>&euro;'+monthCost.toFixed(2)+'</b> / month';
+        breakdown.innerHTML='&euro;0.01 flat + '+tokK+' tokens &times; &euro;'+cost.toFixed(2)+'/M &times; 1.3 = &euro;'+tokenCost.toFixed(2)+'<br>'+runs+' runs &times; &euro;'+perRunCost.toFixed(2)+' = &euro;'+monthCost.toFixed(2)+'/month';
+        var pushary=99,savings=Math.round((1-monthCost/pushary)*100);
+        if(savings>0){vs.innerHTML='vs Pushary $99/mo per seat &mdash; you\'d save ~'+savings+'%';vs.style.display='block';}
+        else{vs.style.display='none';}
+      }
+      models.querySelectorAll('button').forEach(function(b){
+        b.addEventListener('click',function(){
+          models.querySelectorAll('button').forEach(function(x){x.classList.remove('active');});
+          b.classList.add('active');
+          cost=parseFloat(b.getAttribute('data-cost'));
+          calc();
+        });
+      });
+      tokEl.addEventListener('input',function(){
+        tok=parseInt(tokEl.value);
+        tokLbl.textContent=tok>=1000000?(tok/1000000).toFixed(1)+'M':(tok/1000)+'K';
+        calc();
+      });
+      runsEl.addEventListener('input',function(){runs=parseInt(runsEl.value)||1;calc();});
+      calc();
+    })();
   </script>
 </body>
 </html>
