@@ -18,6 +18,7 @@ is both the local controller and the remote worker. "Self-replication" is litera
 
 **Landing page:** [roam.intrane.fr](https://roam.intrane.fr) ·
 **Quickstart:** [docs/quickstart.md](docs/quickstart.md) ·
+**Hub API:** [docs/hub-api.md](docs/hub-api.md) ·
 **Panel:** [roam-panel](https://github.com/javimosch/roam-panel)
 
 ## Quickstart
