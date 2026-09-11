@@ -297,6 +297,64 @@
     </section>
 
     <section>
+      <p class="eyebrow sec-label">Use cases</p>
+      <h2 style="font-size:22px;margin-bottom:24px">What teams run on roam</h2>
+      <div class="proof">
+        <div class="proof-card">
+          <div class="tag">CI / testing</div>
+          <h3>Nightly test runner</h3>
+          <p>Schedule an agent every night: clone the repo, run the full test suite, summarize
+            failures, and post a report to Slack. If a test fix is obvious, the agent opens a PR
+            and parks on <code>git push</code> for your morning approval.</p>
+          <div class="stat"><b>Trigger:</b> cron webhook &middot; <b>Cost:</b> &euro;0.02&ndash;&euro;0.05/night</div>
+        </div>
+        <div class="proof-card">
+          <div class="tag">Ops / maintenance</div>
+          <h3>Log cleanup &amp; disk hygiene</h3>
+          <p>Dispatch an agent to check disk usage, identify old logs and rotated archives, and
+            clean them up. The confirm gate parks <code>rm</code> commands so you see exactly what
+            will be deleted before it happens. Run it on a schedule across every server.</p>
+          <div class="stat"><b>Flag:</b> <code>--confirm</code> &middot; <b>Safe:</b> destructive commands parked</div>
+        </div>
+        <div class="proof-card">
+          <div class="tag">Incident response</div>
+          <h3>First responder</h3>
+          <p>An alert fires (PagerDuty webhook). The agent SSHes into the box, pulls recent logs,
+            checks service status, correlates timestamps, and posts a diagnostic summary to the
+            on-call channel. You get context before you even open your laptop.</p>
+          <div class="stat"><b>Trigger:</b> alert webhook &middot; <b>Output:</b> structured diagnostic report</div>
+        </div>
+        <div class="proof-card">
+          <div class="tag">Code migration</div>
+          <h3>Bulk API migration</h3>
+          <p>"Replace all deprecated <code>foo()</code> calls with <code>bar()</code> across the
+            codebase." The agent reads every file, makes the changes, runs the tests, and opens
+            a PR. You review the diff and approve the push &mdash; the agent never touches prod
+            without you.</p>
+          <div class="stat"><b>Output:</b> reviewed PR &middot; <b>Gate:</b> <code>--confirm</code> on <code>git push</code></div>
+        </div>
+        <div class="proof-card">
+          <div class="tag">GPU / ML</div>
+          <h3>Route to GPU workers</h3>
+          <p>Set <code>"selector":"gpu=true"</code> on the agent spec. Start workers on your GPU
+            boxes with <code>--label gpu=true</code>. The hub only sends those runs to GPU
+            workers. CPU-only tasks go to CPU boxes. One tenant, one wallet, routed
+            automatically.</p>
+          <div class="stat"><b>Routing:</b> selector + labels &middot; <b>Workers:</b> N machines, 1 token</div>
+        </div>
+        <div class="proof-card">
+          <div class="tag">Fleet operations</div>
+          <h3>Multi-server fleet</h3>
+          <p>Run 10 workers across 10 servers with the same token. Each pulls a different run
+            from the queue. Patch configs, rotate certs, restart services, run health checks
+            &mdash; all in parallel, all journaled, all billed through one peage wallet. Scale
+            workers up and down without touching the hub.</p>
+          <div class="stat"><b>Scaling:</b> add workers, no config &middot; <b>Billing:</b> per run, not per seat</div>
+        </div>
+      </div>
+    </section>
+
+    <section>
       <p class="eyebrow sec-label">Why roam</p>
       <div class="compare">
         <div class="hd">&nbsp;</div>
