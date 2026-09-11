@@ -1,0 +1,191 @@
+// update.src — cli-update-spec conformance for roam.
+//
+// `roam update` downloads the latest GitHub release, verifies sha256,
+// smoke-tests the new binary, and atomically swaps (current → .bak).
+// `roam install` relocates the current binary to ~/.local/bin (idempotent).
+// `roam uninstall` removes it.
+//
+// Spec: https://github.com/javimosch/cli-update-spec
+// Conformance: content-hash verify-then-swap smoke-test .bak-rollback self-install
+
+func github_owner() (o) { o = "javimosch" }
+func github_repo() (r) { r = "roam" }
+
+// unq removes surrounding JSON quotes from a json_get result.
+func unq(s) (out) {
+    out = s
+    if len(s) >= 2 && has_prefix(s, "\"") && has_suffix(s, "\"") { out = substr(s, 1, len(s) - 1) }
+}
+
+// self_path returns the absolute path of the running binary.
+func self_path() (p) {
+    p = args()[0]
+    // resolve relative paths
+    if has_prefix(p, "/") == false {
+        _, cwd, _ := exec("pwd")
+        p = trim(cwd) + "/" + p
+    }
+}
+
+// latest_release fetches the latest release tag + asset URLs from GitHub API.
+func latest_release() (tag, binurl, shaurl, ok) {
+    ok = 0
+    url := "https://api.github.com/repos/" + github_owner() + "/" + github_repo() + "/releases/latest"
+    st, body, err := http_request("GET", url, []string{"Accept: application/vnd.github+json"}, "")
+    if err != "" || st != 200 { return }
+    tv, te := json_get(body, ".tag_name")
+    if te != "" { return }
+    tag = unq(tv)
+    // find the linux binary + sha256 assets
+    binurl = ""
+    shaurl = ""
+    i := 0
+    for i < 20 {
+        name, ne := json_get(body, ".assets[" + str(i) + "].name")
+        if ne != "" { i = 20 } else {
+            durl, _ := json_get(body, ".assets[" + str(i) + "].browser_download_url")
+            nm := unq(name)
+            if nm == "roam-x86_64-linux" { binurl = unq(durl) }
+            if nm == "roam-x86_64-linux.sha256" { shaurl = unq(durl) }
+            i = i + 1
+        }
+    }
+    if binurl == "" { return }
+    if shaurl == "" { return }
+    ok = 1
+}
+
+// cmd_update implements `roam update [--check] [--force]`.
+func cmd_update(a) {
+    checkonly := has_flag(a, "--check")
+    force := has_flag(a, "--force")
+
+    tag, binurl, shaurl, ok := latest_release()
+    if ok == 0 {
+        fail(100, "update_failed", "cannot fetch latest release from GitHub", "check network or update manually from github.com/javimosch/roam/releases")
+    }
+
+    latest := tag
+    if has_prefix(latest, "v") { latest = substr(latest, 1, len(latest)) }
+    current := roam_version()
+
+    if latest == current && force == false {
+        println("{\"ok\":true,\"version\":\"" + current + "\",\"up_to_date\":true}")
+        return
+    }
+
+    if checkonly {
+        println("{\"ok\":true,\"local\":\"" + current + "\",\"remote\":\"" + latest + "\",\"up_to_date\":false}")
+        return
+    }
+
+    // download to temp
+    tmp := roam_home() + "/.update-roam"
+    write(2, "[update] downloading v" + latest + "...\n")
+    st, _, err := http_download(binurl, tmp)
+    if err != "" || st != 200 {
+        fail(100, "update_failed", "download failed: " + err, "check network or download manually")
+    }
+
+    // verify sha256
+    st2, shabody, err2 := http_request("GET", shaurl, []string{}, "")
+    if err2 != "" || st2 != 200 {
+        rm(tmp)
+        fail(100, "update_failed", "cannot fetch sha256 checksum", "download manually and verify")
+    }
+    expected := trim(shabody)
+    // sha256 file format: "<hash>  roam-x86_64-linux" — take first field
+    si := index(expected, "  ")
+    if si > 0 { expected = substr(expected, 0, si) }
+    actual := sha256_file(tmp)
+    if actual != expected {
+        rm(tmp)
+        fail(100, "update_failed", "sha256 mismatch: expected " + expected + ", got " + actual, "download manually and verify")
+    }
+    write(2, "[update] sha256 verified\n")
+
+    // smoke-test: run the new binary's version command
+    code, out, _ := exec(tmp + " version")
+    if code != 0 || contains(out, "\"ok\":true") == false {
+        rm(tmp)
+        fail(100, "update_failed", "smoke test failed: new binary does not respond to version", "download manually")
+    }
+    write(2, "[update] smoke test passed\n")
+
+    // atomic swap: current → .bak, new → current
+    self := self_path()
+    bak := self + ".bak"
+    rm(bak)
+    rename(self, bak)
+    rename(tmp, self)
+    chmod(self, 493)  // 0755
+
+    println("{\"ok\":true,\"version\":\"" + latest + "\",\"previous\":\"" + current + "\",\"backup\":\"" + bak + "\"}")
+}
+
+// cmd_install implements `roam install [--path <dir>]`.
+// Relocates the running binary to ~/.local/bin (default), idempotent.
+func cmd_install(a) {
+    dest := flag(a, "--path", env("HOME") + "/.local/bin")
+    mkdir(dest)
+    target := dest + "/roam"
+    self := self_path()
+    if self == target {
+        println("{\"ok\":true,\"installed\":true,\"path\":\"" + target + "\",\"already\":true}")
+        return
+    }
+    // copy current binary to dest
+    code, _, _ := exec("cp " + self + " " + target)
+    if code != 0 {
+        fail(100, "install_failed", "cannot copy to " + target, "check permissions on " + dest)
+    }
+    chmod(target, 493)  // 0755
+    println("{\"ok\":true,\"installed\":true,\"path\":\"" + target + "\"}")
+}
+
+// cmd_uninstall removes the binary from ~/.local/bin (or --path).
+func cmd_uninstall(a) {
+    dest := flag(a, "--path", env("HOME") + "/.local/bin")
+    target := dest + "/roam"
+    if file_exists(target) == false {
+        fail(92, "not_found", "roam is not installed at " + target, "roam install --path " + dest)
+    }
+    rm(target)
+    println("{\"ok\":true,\"uninstalled\":true,\"path\":\"" + target + "\"}")
+}
+
+// file_exists checks if a file exists.
+func file_exists(p) (ok) {
+    ok = false
+    _, _, err := exec("test -f " + p)
+    if err == "" { ok = true }
+}
+
+// rm removes a file (best-effort).
+func rm(p) { system("rm -f " + p + " 2>/dev/null") }
+
+// rename moves a file.
+func rename(from, to) { system("mv " + from + " " + to + " 2>/dev/null") }
+
+// chmod sets file permissions.
+func chmod(p, mode) { system("chmod " + str(mode) + " " + p + " 2>/dev/null") }
+
+// sha256_file computes the SHA256 hash of a file.
+func sha256_file(p) (h) {
+    h = ""
+    code, out, err := exec("sha256sum " + p)
+    if code != 0 || err != "" { return }
+    si := index(out, "  ")
+    if si > 0 { h = trim(substr(out, 0, si)) }
+}
+
+// http_download downloads a URL to a file. Returns (status, _, error).
+func http_download(url, dest) (st, body, err) {
+    code, _, e := exec("curl -fsSL -o " + dest + " " + url)
+    if code != 0 {
+        err = e
+        st = code
+        return
+    }
+    st = 200
+}

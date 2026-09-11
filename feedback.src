@@ -1,0 +1,65 @@
+// feedback.src — cli-feedback-spec conformance for roam.
+//
+// `roam feedback "<message>" [--kind bug|idea|praise] [--context "..."]`
+// Dual-writes to the central relay (feedback.intrane.fr). Never fails the caller.
+// Override relay with ROAM_FEEDBACK_RELAY (or "off" to disable).
+//
+// Spec: https://github.com/javimosch/cli-feedback-spec
+// Conformance: dual-write idempotent never-fail swappable-relay
+
+func feedback_relay() (u) {
+    u = env_or("ROAM_FEEDBACK_RELAY", "https://feedback.intrane.fr")
+}
+
+func cmd_feedback(a) {
+    // find the message argument (first non-flag arg after "feedback")
+    msg := ""
+    kind := "note"
+    ctx := ""
+    i := 2  // skip "roam" and "feedback"
+    for i < len(a) {
+        if a[i] == "--kind" && i + 1 < len(a) { kind = a[i + 1]  i = i + 2  continue }
+        if a[i] == "--context" && i + 1 < len(a) { ctx = a[i + 1]  i = i + 2  continue }
+        if msg == "" { msg = a[i] }
+        i = i + 1
+    }
+
+    if msg == "" {
+        write(2, "usage: roam feedback \"<message>\" [--kind bug|idea|praise] [--context \"...\"]\n")
+        fail(82, "missing_argument", "feedback message is required", "roam feedback \"your message\"")
+    }
+
+    // generate an id
+    id := to_hex(rand_bytes(8))
+
+    reporter := env_or("USER", "agent")
+
+    payload := "{\"app\":\"roam\",\"version\":" + jstr(roam_version()) +
+        ",\"kind\":" + jstr(kind) +
+        ",\"message\":" + jstr(msg) +
+        ",\"context\":" + jstr(ctx) +
+        ",\"reporter\":" + jstr(reporter) +
+        ",\"id\":" + jstr(id) + "}"
+
+    relayed := false
+    relay := feedback_relay()
+    if relay != "off" {
+        st, _, err := http_request("POST", relay + "/v1/feedback", []string{"content-type: application/json"}, payload)
+        if err == "" && st >= 200 && st < 300 {
+            relayed = true
+        }
+    }
+
+    // never fail the caller — feedback is best-effort
+    println("{\"ok\":true,\"id\":" + jstr(id) + ",\"relayed\":" + bool_str(relayed) + "}")
+}
+
+func bool_str(b) (s) {
+    s = "false"
+    if b == true { s = "true" }
+}
+
+func env_or(k, d) (v) {
+    v = env(k)
+    if v == "" { v = d }
+}

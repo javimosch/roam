@@ -5,7 +5,7 @@ VERSION ?= 0.5.0
 
 # Dynamic build (links libsqlite3 + OpenSSL from the host).
 build:
-	machin encode roam.src telemetry.src > roam.mfl
+	machin encode roam.src telemetry.src update.src feedback.src > roam.mfl
 	machin build roam.mfl -o roam
 
 # Fully-static release binary: bundles the SQLite amalgamation, statically links
@@ -20,7 +20,7 @@ version-check:
 	  exit 1; }
 
 release: version-check
-	machin encode roam.src telemetry.src > roam.mfl
+	machin encode roam.src telemetry.src update.src feedback.src > roam.mfl
 	machin build --static roam.mfl -o roam-x86_64-linux
 	sha256sum roam-x86_64-linux > roam-x86_64-linux.sha256
 	@echo "built roam-x86_64-linux ($$(du -h roam-x86_64-linux | cut -f1), static)"
