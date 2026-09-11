@@ -6,6 +6,7 @@
 <title>roam — approve your remote agents from your phone</title>
 <meta name="description" content="Run autonomous agents on your own servers. When one hits something destructive, it parks and asks — approve or deny from your phone.">
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22%3E%3Ctext y=%22.9em%22 font-size=%2290%22%3E%F0%9F%9B%B0%EF%B8%8F%3C/text%3E%3C/svg%3E">
+<script defer src="https://vigie.intrane.fr/vigie.js"></script>
 </head>
 <body>
 <style>
@@ -249,7 +250,7 @@
         <h2>Leave agents running. Sleep fine.</h2>
         <p>The roam CLI is free and open source today. Join the waitlist for the hosted panel —
           notify, approve from anywhere, and fleet view.</p>
-        <form onsubmit="event.preventDefault();var e=this.querySelector('input').value;try{window.SuperInsights&&SuperInsights.trackEvent&&SuperInsights.trackEvent('waitlist_signup',{email:e});SuperInsights.flush&&SuperInsights.flush();}catch(_){}this.style.display='none';document.getElementById('thx').style.display='block';">
+        <form onsubmit="event.preventDefault();var e=this.querySelector('input').value;try{window.vigie&&vigie('waitlist_signup',{email:e});}catch(_){}this.style.display='none';document.getElementById('thx').style.display='block';">
           <input type="email" required placeholder="you@company.com" aria-label="email">
           <button class="btn btn-primary" type="submit" data-id="cta-waitlist-submit">Get early access</button>
         </form>
@@ -266,14 +267,10 @@
   </div>
 </div>
 
-  <script src="https://superinsights.coolify.intrane.fr/sdk/superinsights.js"></script>
   <script>
-    if (window.SuperInsights) {
-      SuperInsights.init('pk_babc649a432174dffa12b426eec2d2a6f80a8b4b02eccd67b157ce586712b290', { apiUrl: 'https://superinsights.coolify.intrane.fr' });
-      document.querySelectorAll('[data-id]').forEach(function(el){
-        el.addEventListener('click', function(){ try { SuperInsights.trackEvent && SuperInsights.trackEvent('cta_click', { id: el.getAttribute('data-id') }); } catch(e){} });
-      });
-    }
+    document.querySelectorAll('[data-id]').forEach(function(el){
+      el.addEventListener('click', function(){ try { window.vigie && vigie('cta_click', { id: el.getAttribute('data-id') }); } catch(e){} });
+    });
   </script>
 </body>
 </html>
