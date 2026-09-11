@@ -178,6 +178,15 @@
   .proof-card .stat{font-family:var(--mono);font-size:11px;color:var(--muted);margin-top:12px;
     padding-top:12px;border-top:1px solid var(--border)}
   .proof-card .stat b{color:var(--ink)}
+  .faq-grid{display:grid;gap:12px;max-width:780px;margin:0 auto}
+  .faq-item{background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:18px 22px}
+  .faq-item summary{cursor:pointer;font-weight:600;font-size:14px;color:var(--ink);list-style:none;
+    display:flex;justify-content:space-between;align-items:center}
+  .faq-item summary::-webkit-details-marker{display:none}
+  .faq-item summary::after{content:'+';font-family:var(--mono);color:var(--muted);font-size:16px}
+  .faq-item[open] summary::after{content:'\2212'}
+  .faq-item p{margin:12px 0 0;color:var(--muted);font-size:13px;line-height:1.6}
+  .faq-item code{font-family:var(--mono);font-size:12px;background:var(--bg);padding:1px 5px;border-radius:4px}
   .cta-card{background:var(--surface);border:1px solid var(--border);border-radius:16px;padding:36px 32px;text-align:center}
   .cta-card h2{font-size:24px}
   .cta-card p{color:var(--muted);max-width:52ch;margin:14px auto 0}
@@ -410,6 +419,75 @@
             <div class="vs" id="calc-vs">vs Pushary $99/mo per seat &mdash; you'd save ~67%</div>
           </div>
         </div>
+      </div>
+    </section>
+
+    <section id="faq">
+      <p class="eyebrow" style="text-align:center;margin-bottom:8px">FAQ</p>
+      <h2 style="text-align:center;font-size:22px;margin-bottom:28px">Common questions</h2>
+      <div class="faq-grid">
+        <details class="faq-item">
+          <summary>How does roam work?</summary>
+          <p>roam is one static binary. You run <code>roam send --to prod-01 --goal "..."</code> and it
+          copies itself to the target, starts a detached worker, and runs an LLM-backed agent loop.
+          The agent calls tools (shell, file I/O, finish), journals every step, and parks destructive
+          commands for your approval if <code>--confirm</code> is set. You watch with
+          <code>roam attach</code> and control with <code>roam approve</code> / <code>roam stop</code>.</p>
+        </details>
+        <details class="faq-item">
+          <summary>Can I run multiple workers on different machines?</summary>
+          <p>Yes. Start <code>roam worker --hub &lt;url&gt; --token &lt;rhw_...&gt;</code> on as many
+          machines as you want. They share one worker token and pull from the same queue. Each worker
+          gets a different run &mdash; the hub's atomic claim guard prevents double-claiming. This is
+          horizontal scaling: more workers = more parallel runs, all billed through the same peage
+          wallet.</p>
+        </details>
+        <details class="faq-item">
+          <summary>Can I route specific agents to specific workers?</summary>
+          <p>Yes. Set a <code>selector</code> on the agent spec (e.g., <code>"selector":"gpu=true"</code>)
+          and start the worker with matching labels: <code>roam worker --label gpu=true --name gpu-box-01</code>.
+          The hub only hands a run to a worker whose labels satisfy the agent's selector. Empty selector
+          = any worker. This lets you keep GPU agents on GPU boxes, Docker agents on Docker hosts, etc.,
+          all within a single tenant.</p>
+        </details>
+        <details class="faq-item">
+          <summary>How does billing work on the hosted hub?</summary>
+          <p>Per run, no monthly fee. The hub proxies every LLM call through its own key (workers hold
+          no model keys), meters exact tokens from the upstream response, and charges your peage wallet:
+          <code>&euro;0.01 flat + token_cost &times; 1.3</code>. A typical coding task costs
+          &euro;0.02&ndash;&euro;0.10. You top up your wallet with a card via Stripe. Self-hosting is
+          free &mdash; bring your own API key.</p>
+        </details>
+        <details class="faq-item">
+          <summary>What if a worker dies mid-run?</summary>
+          <p>The hub reclaims it. If a run has no worker activity for 15 minutes, it goes back to the
+          queue for another worker to pick up. After one reclaim attempt, the run is declared lost and
+          billed only for what it actually metered. Your webhook (if set) hears about the loss &mdash;
+          never silence.</p>
+        </details>
+        <details class="faq-item">
+          <summary>Is roam self-hostable?</summary>
+          <p>Yes &mdash; that's the primary mode. The CLI is MIT-licensed and the panel is self-hostable
+          with <a href="https://github.com/javimosch/roam-panel" style="color:var(--accent)">roam-panel</a>.
+          Bring your own Anthropic/OpenAI key, run workers on your own machines, approve from the panel
+          or your terminal. The hosted hub is for when you don't want to manage keys, billing, and
+          worker coordination yourself.</p>
+        </details>
+        <details class="faq-item">
+          <summary>What LLM providers are supported?</summary>
+          <p>Anthropic (Claude), OpenAI-compatible (GPT, DeepSeek, Llama, etc. via OpenRouter), and
+          debri/Devin delegation. Self-hosted: set <code>ANTHROPIC_API_KEY</code> or
+          <code>ROAM_API_KEY</code> on the target. Hosted: the hub proxies through OpenRouter with
+          its own key &mdash; you pick the model per agent.</p>
+        </details>
+        <details class="faq-item">
+          <summary>How is this different from Pushary, Orbiter, or Docker Agent?</summary>
+          <p>roam is one binary, no Docker, no daemon, no agent installed on the target. It copies
+          itself over SSH and runs. The confirm gate parks destructive commands for human approval
+          &mdash; you see exactly what the agent wants to do before it does it. The hosted hub bills
+          per run (&euro;0.02&ndash;&euro;0.10) instead of per seat ($99/mo). And it's MIT-licensed
+          &mdash; self-host free, hosted when you want convenience.</p>
+        </details>
       </div>
     </section>
 
